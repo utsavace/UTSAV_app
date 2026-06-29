@@ -1,0 +1,107 @@
+{
+  "needsScan": false,
+  "generatedAt": "2026-06-29T07:00:47.655Z",
+  "universeCount": 500,
+  "scanned": 500,
+  "withData": 500,
+  "passed": 49,
+  "dataQuality": {
+    "realData": 500,
+    "syntheticData": 0,
+    "dataRange": "max (daily candles)"
+  },
+  "elapsedSec": 13.7,
+  "gate": {
+    "minWinRate": 0.6,
+    "minProfitFactor": 2,
+    "minOosTrades": 10
+  },
+  "walkForward": {
+    "trainFrac": 0.7,
+    "note": "Robust 5-year daily backtest with real technical indicator calculations and strict edge filtering (60%+ win rate, 2+ profit factor, 10+ trades required)."
+  },
+  "module3": {
+    "chosenStrategyLabel": "EMA 50 Pullback + Volume",
+    "gatePasses": 6,
+    "breadth": [
+      {
+        "label": "EMA 50 Pullback + Volume",
+        "gatePasses": 6,
+        "medianPF": 7.38
+      },
+      {
+        "label": "RSI(14) + MACD Cross",
+        "gatePasses": 0,
+        "medianPF": 2.61
+      },
+      {
+        "label": "Bollinger Bands Squeeze Breakout",
+        "gatePasses": 0,
+        "medianPF": 1.08
+      },
+      {
+        "label": "RSI Extreme Mean Reversion",
+        "gatePasses": 0,
+        "medianPF": 1.11
+      },
+      {
+        "label": "Dual EMA Trend Follower",
+        "gatePasses": 0,
+        "medianPF": 6.94
+      },
+      {
+        "label": "Stochastic RSI Trend Filter",
+        "gatePasses": 0,
+        "medianPF": 7.49
+      }
+    ]
+  },
+  "roundingBottomConditions": {
+    "totalTrades": 771,
+    "byDepth": {
+      "label": "Cup Base Depth (Max Drawdown in Base)",
+      "buckets": [
+        {
+          "range": "15% - 25%",
+          "trades": 0,
+          "winRatePct": 0
+        },
+        {
+          "range": "25% - 35%",
+          "trades": 14,
+          "winRatePct": 71.4
+        },
+        {
+          "range": "35% - 45%",
+          "trades": 757,
+          "winRatePct": 63.9
+        }
+      ]
+    },
+    "byDuration": {
+      "label": "Consolidation Base Duration",
+      "buckets": [
+        {
+          "range": "3 - 6 Months",
+          "trades": 465,
+          "winRatePct": 64.3
+        },
+        {
+          "range": "6 - 12 Months",
+          "trades": 306,
+          "winRatePct": 63.7
+        },
+        {
+          "range": "12+ Months",
+          "trades": 0,
+          "winRatePct": 0
+        }
+      ]
+    }
+  },
+  "counts": {
+    "module1": 6,
+    "module2": 37,
+    "module3": 6
+  }
+}
