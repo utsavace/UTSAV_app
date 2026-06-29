@@ -605,6 +605,8 @@ function parseYahooChart(jsonData: any): OHLCV[] {
     const closes = quote.close || [];
     const volumes = quote.volume || [];
     const timestamps = result.timestamp || [];
+    // Use the exchange timezone offset so each candle maps to its real local trading day
+    const tzOffsetSec = (result.meta && typeof result.meta.gmtoffset === "number") ? result.meta.gmtoffset : 19800; // IST default
 
     const data: OHLCV[] = [];
     for (let i = 0; i < closes.length; i++) {
@@ -612,9 +614,12 @@ function parseYahooChart(jsonData: any): OHLCV[] {
         closes[i] !== null && closes[i] !== undefined &&
         opens[i] !== null && opens[i] !== undefined &&
         highs[i] !== null && highs[i] !== undefined &&
-        lows[i] !== null && lows[i] !== undefined
+        lows[i] !== null && lows[i] !== undefined &&
+        timestamps[i]
       ) {
-        const ts = timestamps[i] ? new Date(timestamps[i] * 1000) : new Date();
+        const ts = new Date((timestamps[i] + tzOffsetSec) * 1000);
+        const dow = ts.getUTCDay();
+        if (dow === 0 || dow === 6) continue; // skip weekend bars (weekly/aggregated candles, never real trading days)
         data.push({
           date: ts.toISOString().slice(0, 10),
           open: opens[i],
@@ -635,7 +640,9 @@ function parseYahooChart(jsonData: any): OHLCV[] {
 
 async function fetchStockData(symbol: string): Promise<OHLCV[] | null> {
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=${YAHOO_RANGE}&interval=1d`;
+    const period2 = Math.floor(Date.now() / 1000);
+    const period1 = Math.floor(new Date("2005-01-01T00:00:00Z").getTime() / 1000);
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000); // 8s cap so a blocked network can't hang the scan
     const res = await (globalThis as any).fetch(url, {
