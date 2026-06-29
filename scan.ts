@@ -435,7 +435,7 @@ function backtestStrategy(
           const minMiddle = Math.min(...slice.slice(20, 40));
           const maxRight = Math.max(...slice.slice(40, 60));
           const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
-          trigger = depth >= 15 && depth <= 45 && maxRight >= maxLeft * 0.95;
+          trigger = depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92;
         }
       } else if (strategyId === "m3_best_overall") {
         trigger = (ema9[i] || 0) > (ema21[i] || 0) && (ema9[i - 1] || 0) <= (ema21[i - 1] || 0) && (macd.macdLine[i] || 0) > (macd.signalLine[i] || 0);
@@ -889,7 +889,7 @@ export async function runScan(
           const minMiddle = Math.min(...slice.slice(20, 40));
           const maxRight = Math.max(...slice.slice(40, 60));
           const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
-          if (depth >= 15 && depth <= 45 && maxRight >= maxLeft * 0.95) {
+          if (depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92) {
             if (depth > deepestDepth) {
               deepestDepth = depth;
               actualDurationMonths = Math.round(60 / 20) + (j % 5); // 3 to 7 months base duration
@@ -995,9 +995,9 @@ export async function runScan(
 
   // Categorize rounding bottom rows dynamically for our research buckets!
   const depthBuckets = [
-    { range: "15% - 25%", min: 15, max: 25, trades: 0, wins: 0 },
-    { range: "25% - 35%", min: 25, max: 35, trades: 0, wins: 0 },
-    { range: "35% - 45%", min: 35, max: 45, trades: 0, wins: 0 }
+    { range: "12% - 19%", min: 12, max: 19, trades: 0, wins: 0 },
+    { range: "19% - 26%", min: 19, max: 26, trades: 0, wins: 0 },
+    { range: "26% - 33%", min: 26, max: 33, trades: 0, wins: 0 }
   ];
 
   const durationBuckets = [
@@ -1064,9 +1064,9 @@ export async function runScan(
       minProfitFactor: MIN_PROFIT_FACTOR,
       minOosTrades: MIN_TRADES // screens out low-sample flukes
     },
-    walkForward: {
-      trainFrac: 0.7,
-      note: `Robust 5-year daily backtest with real technical indicator calculations and strict edge filtering (${MIN_WIN_RATE}%+ win rate, ${MIN_PROFIT_FACTOR}+ profit factor, ${MIN_TRADES}+ trades required).` // ← HONEST
+    backtestMethod: {
+      type: "full-history single-pass",
+      note: `Full available-history daily backtest (single-pass, no walk-forward / out-of-sample split). Real indicators with strict edge filtering: ${MIN_WIN_RATE}%+ win rate, ${MIN_PROFIT_FACTOR}+ profit factor, ${MIN_TRADES}+ trades. Gross returns — no costs/slippage.`
     },
     module3: {
       chosenStrategyLabel: bestGlobalStrategyLabel,

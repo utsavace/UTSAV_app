@@ -12,6 +12,7 @@ interface Meta {
   elapsedSec?: number;
   gate?: { minWinRate: number; minProfitFactor: number; minOosTrades: number };
   walkForward?: { trainFrac: number; note: string };
+  backtestMethod?: { type: string; note: string };
   module3?: {
     chosenStrategyLabel: string;
     gatePasses: number;
@@ -34,8 +35,8 @@ const TABS = [
 ] as const;
 
 const DESC: Record<number, string> = {
-  1: "Analyzes each stock to evaluate and select its highest-performing backtest strategy (RSI, MACD, EMA, Bollinger, and ADX combinations) using a rigorous 5-year daily high-fidelity single-pass evaluation.",
-  2: "Detects rounding bottom (U-shaped) consolidation bases on 5-year historical charts. Confirms pattern parameters, monitors breakout structures, and tracks precise entry and exit statistics.",
+  1: "Analyzes each stock to evaluate and select its highest-performing backtest strategy (RSI, MACD, EMA, Bollinger, and ADX combinations) using a full-history daily single-pass evaluation.",
+  2: "Detects rounding bottom (U-shaped) consolidation bases (12-33% cup depth) on full-history charts. Confirms pattern parameters, monitors breakout structures, and tracks precise entry and exit statistics.",
   3: "Identifies the single high-probability technical strategy that registers the greatest number of breadth passes across the entire Nifty 500 universe to maximize robustness.",
 };
 
@@ -233,7 +234,7 @@ export default function App() {
           <span className="mark">
             edge<span className="dot">.</span>ledger
           </span>
-          <span className="sub">Nifty 500 · 5-Year Backtest · High Fidelity</span>
+          <span className="sub">Nifty 500 · Full-History Backtest · Gross Returns</span>
         </div>
         <div className="flex items-center gap-4 flex-wrap">
           {import.meta.env.DEV && (
@@ -446,7 +447,7 @@ export default function App() {
                     <code className="bg-[#151b27] px-2 py-0.5 rounded text-white font-semibold">npm run scan:demo</code>
                   </div>
                   <div className="flex justify-between items-center">
-                    <span>Full 5-year scan:</span>
+                    <span>Full-history scan:</span>
                     <code className="bg-[#151b27] px-2 py-0.5 rounded text-white font-semibold">npm run scan</code>
                   </div>
                 </div>

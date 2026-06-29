@@ -1,24 +1,24 @@
 {
   "needsScan": false,
-  "generatedAt": "2026-06-29T07:00:47.655Z",
+  "generatedAt": "2026-06-29T08:35:29.045Z",
   "universeCount": 500,
   "scanned": 500,
   "withData": 500,
-  "passed": 49,
+  "passed": 60,
   "dataQuality": {
     "realData": 500,
     "syntheticData": 0,
     "dataRange": "max (daily candles)"
   },
-  "elapsedSec": 13.7,
+  "elapsedSec": 9.1,
   "gate": {
     "minWinRate": 0.6,
     "minProfitFactor": 2,
     "minOosTrades": 10
   },
-  "walkForward": {
-    "trainFrac": 0.7,
-    "note": "Robust 5-year daily backtest with real technical indicator calculations and strict edge filtering (60%+ win rate, 2+ profit factor, 10+ trades required)."
+  "backtestMethod": {
+    "type": "full-history single-pass",
+    "note": "Full available-history daily backtest (single-pass, no walk-forward / out-of-sample split). Real indicators with strict edge filtering: 60%+ win rate, 2+ profit factor, 10+ trades. Gross returns — no costs/slippage."
   },
   "module3": {
     "chosenStrategyLabel": "EMA 50 Pullback + Volume",
@@ -27,7 +27,12 @@
       {
         "label": "EMA 50 Pullback + Volume",
         "gatePasses": 6,
-        "medianPF": 7.38
+        "medianPF": 7.39
+      },
+      {
+        "label": "Dual EMA Trend Follower",
+        "gatePasses": 1,
+        "medianPF": 2
       },
       {
         "label": "RSI(14) + MACD Cross",
@@ -45,36 +50,31 @@
         "medianPF": 1.11
       },
       {
-        "label": "Dual EMA Trend Follower",
-        "gatePasses": 0,
-        "medianPF": 6.94
-      },
-      {
         "label": "Stochastic RSI Trend Filter",
         "gatePasses": 0,
-        "medianPF": 7.49
+        "medianPF": 7.5
       }
     ]
   },
   "roundingBottomConditions": {
-    "totalTrades": 771,
+    "totalTrades": 881,
     "byDepth": {
       "label": "Cup Base Depth (Max Drawdown in Base)",
       "buckets": [
         {
-          "range": "15% - 25%",
+          "range": "12% - 19%",
           "trades": 0,
           "winRatePct": 0
         },
         {
-          "range": "25% - 35%",
-          "trades": 14,
-          "winRatePct": 71.4
+          "range": "19% - 26%",
+          "trades": 28,
+          "winRatePct": 60.7
         },
         {
-          "range": "35% - 45%",
-          "trades": 757,
-          "winRatePct": 63.9
+          "range": "26% - 33%",
+          "trades": 853,
+          "winRatePct": 63
         }
       ]
     },
@@ -83,13 +83,13 @@
       "buckets": [
         {
           "range": "3 - 6 Months",
-          "trades": 465,
-          "winRatePct": 64.3
+          "trades": 485,
+          "winRatePct": 63.1
         },
         {
           "range": "6 - 12 Months",
-          "trades": 306,
-          "winRatePct": 63.7
+          "trades": 396,
+          "winRatePct": 62.6
         },
         {
           "range": "12+ Months",
@@ -100,8 +100,8 @@
     }
   },
   "counts": {
-    "module1": 6,
-    "module2": 37,
+    "module1": 7,
+    "module2": 47,
     "module3": 6
   }
 }
