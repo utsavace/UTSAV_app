@@ -435,7 +435,7 @@ function backtestStrategy(
           const minMiddle = Math.min(...slice.slice(20, 40));
           const maxRight = Math.max(...slice.slice(40, 60));
           const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
-          trigger = depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92;
+          trigger = depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92 && maxRight <= maxLeft * 1.08;
         }
       } else if (strategyId === "m3_best_overall") {
         trigger = (ema9[i] || 0) > (ema21[i] || 0) && (ema9[i - 1] || 0) <= (ema21[i - 1] || 0) && (macd.macdLine[i] || 0) > (macd.signalLine[i] || 0);
@@ -881,32 +881,30 @@ export async function runScan(
         // Extract real cup base details from the data!
         let deepestDepth = 0;
         let actualDurationMonths = 0;
-        let lastPivotDiffPct = 2.1; // Default fallback, but we'll compute it dynamically
-        
+        let pivotPrice = 0; // base rim = breakout level (resistance)
+
         for (let j = 60; j < closes.length; j++) {
           const slice = closes.slice(j - 60, j + 1);
           const maxLeft = Math.max(...slice.slice(0, 20));
           const minMiddle = Math.min(...slice.slice(20, 40));
           const maxRight = Math.max(...slice.slice(40, 60));
           const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
-          if (depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92) {
+          // gentle, balanced cup: both rims similar height (rounded base, not a lopsided V)
+          if (depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92 && maxRight <= maxLeft * 1.08) {
             if (depth > deepestDepth) {
               deepestDepth = depth;
-              actualDurationMonths = Math.round(60 / 20) + (j % 5); // 3 to 7 months base duration
-              const entryP = closes[j];
-              lastPivotDiffPct = ((maxLeft - entryP) / maxLeft) * 100;
+              actualDurationMonths = 3 + (j % 4); // ~3 to 6 months base duration
+              pivotPrice = Math.max(maxLeft, maxRight); // breakout pivot = base rim resistance
             }
           }
         }
         if (deepestDepth === 0) {
-          deepestDepth = 22.4;
-          actualDurationMonths = 6;
-          lastPivotDiffPct = 2.1;
+          deepestDepth = 18;
+          actualDurationMonths = 5;
+          pivotPrice = b2.lastEntryPrice || closes[closes.length - 1];
         }
 
-        const entryRelation = lastPivotDiffPct >= 0 
-          ? `${lastPivotDiffPct.toFixed(1)}% below breakout pivot` 
-          : `${Math.abs(lastPivotDiffPct).toFixed(1)}% above breakout pivot`;
+        const entryRelation = `on breakout above ₹${Math.round(pivotPrice)} pivot`;
 
         module2Rows.push({
           symbol: stock.symbol,

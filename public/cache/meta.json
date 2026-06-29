@@ -1,16 +1,16 @@
 {
   "needsScan": false,
-  "generatedAt": "2026-06-29T08:35:29.045Z",
+  "generatedAt": "2026-06-29T09:19:12.872Z",
   "universeCount": 500,
   "scanned": 500,
   "withData": 500,
-  "passed": 60,
+  "passed": 14,
   "dataQuality": {
     "realData": 500,
     "syntheticData": 0,
     "dataRange": "max (daily candles)"
   },
-  "elapsedSec": 9.1,
+  "elapsedSec": 17.1,
   "gate": {
     "minWinRate": 0.6,
     "minProfitFactor": 2,
@@ -27,7 +27,7 @@
       {
         "label": "EMA 50 Pullback + Volume",
         "gatePasses": 6,
-        "medianPF": 7.39
+        "medianPF": 7.4
       },
       {
         "label": "Dual EMA Trend Follower",
@@ -52,12 +52,12 @@
       {
         "label": "Stochastic RSI Trend Filter",
         "gatePasses": 0,
-        "medianPF": 7.5
+        "medianPF": 7.49
       }
     ]
   },
   "roundingBottomConditions": {
-    "totalTrades": 881,
+    "totalTrades": 10,
     "byDepth": {
       "label": "Cup Base Depth (Max Drawdown in Base)",
       "buckets": [
@@ -68,13 +68,13 @@
         },
         {
           "range": "19% - 26%",
-          "trades": 28,
-          "winRatePct": 60.7
+          "trades": 0,
+          "winRatePct": 0
         },
         {
           "range": "26% - 33%",
-          "trades": 853,
-          "winRatePct": 63
+          "trades": 10,
+          "winRatePct": 60
         }
       ]
     },
@@ -83,13 +83,13 @@
       "buckets": [
         {
           "range": "3 - 6 Months",
-          "trades": 485,
-          "winRatePct": 63.1
+          "trades": 10,
+          "winRatePct": 60
         },
         {
           "range": "6 - 12 Months",
-          "trades": 396,
-          "winRatePct": 62.6
+          "trades": 0,
+          "winRatePct": 0
         },
         {
           "range": "12+ Months",
@@ -101,7 +101,7 @@
   },
   "counts": {
     "module1": 7,
-    "module2": 47,
+    "module2": 1,
     "module3": 6
   }
 }
