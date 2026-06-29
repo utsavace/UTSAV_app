@@ -83,6 +83,32 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
     return `${parseInt(d, 10)} ${months[mIdx] || m} ${y}`;
   };
 
+  const renderTodayPlan = (r: LedgerRow) => {
+    if (r.liveSignal && r.livePrice) {
+      const entry = r.livePrice;
+      const stop = Math.round(entry * 0.92);
+      const target = Math.round(entry * (1 + r.avgReturnPct / 100));
+      const risk = entry - stop;
+      const reward = target - entry;
+      const rr = risk > 0 ? (reward / risk).toFixed(1) : "—";
+      return (
+        <div style={{ marginBottom: "12px", padding: "10px 12px", borderRadius: "8px", background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.35)", fontFamily: "monospace", fontSize: "12.5px", color: "#c9f5d6" }}>
+          <div style={{ fontWeight: 700, color: "#22c55e", marginBottom: "4px" }}>📍 LIVE setup (as of latest close)</div>
+          <div>Entry zone ≈ <strong>₹{entry}</strong> · Stop-loss <strong>₹{stop}</strong> (−8%) · Target ≈ <strong>₹{target}</strong> (+{r.avgReturnPct.toFixed(1)}% avg) · R:R ≈ 1:{rr}</div>
+          <div style={{ color: "#8e9ba9", fontSize: "11px", marginTop: "5px" }}>Enter only if price is still near the entry zone (not already run up). Backtest-derived levels — educational, not financial advice.</div>
+        </div>
+      );
+    }
+    return (
+      <div style={{ marginBottom: "12px", padding: "10px 12px", borderRadius: "8px", background: "rgba(142,155,169,0.08)", border: "1px solid #2a3342", fontFamily: "monospace", fontSize: "12.5px", color: "#a7b2c0" }}>
+        <div style={{ fontWeight: 700, color: "#8e9ba9", marginBottom: "4px" }}>⚪ No live entry today — history only</div>
+        <div>
+          The trades below are <strong>past backtest signals</strong>{r.lastEntryPrice ? ` (last one entered at ₹${Math.round(r.lastEntryPrice)}, long gone)` : ""}. Don't buy at those old prices. Wait for a <strong>LIVE</strong> signal — use the “LIVE Signals Only” filter to see stocks that are entry-ready now.
+        </div>
+      </div>
+    );
+  };
+
   const renderHistory = (r: LedgerRow) => {
     const key = r.tradesKey || `${r.symbol}__${r.strategyId}`;
     const all = tradesCache[key];
@@ -94,8 +120,11 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
       .sort((a, b) => b.entryDate.localeCompare(a.entryDate));
     if (!filtered.length) {
       return (
-        <div style={{ padding: "14px", color: "#8e9ba9", fontFamily: "monospace", fontSize: "12px" }}>
-          No signals found since <strong>{formatDateHuman(historyStart)}</strong> (out of {all.length} total backtest signals).
+        <div style={{ padding: "12px 14px" }}>
+          {renderTodayPlan(r)}
+          <div style={{ color: "#8e9ba9", fontFamily: "monospace", fontSize: "12px" }}>
+            No signals found since <strong>{formatDateHuman(historyStart)}</strong> (out of {all.length} total backtest signals).
+          </div>
         </div>
       );
     }
@@ -104,6 +133,7 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
     const wr = Math.round((wins / filtered.length) * 100);
     return (
       <div style={{ padding: "12px 14px" }}>
+        {renderTodayPlan(r)}
         <div style={{ marginBottom: "12px", fontSize: "13px", color: "#c9d3df", fontFamily: "monospace", display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
           <span style={{ backgroundColor: "rgba(59, 130, 246, 0.15)", color: "#60a5fa", border: "1px solid rgba(59, 130, 246, 0.3)", padding: "2px 6px", borderRadius: "4px", fontSize: "11px", fontWeight: "bold" }}>
             DATE FILTER ACTIVE
