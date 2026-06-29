@@ -37,11 +37,12 @@ interface LedgerProps {
   sortAsc: boolean;
   onSort: (field: keyof LedgerRow) => void;
   historyStart: string; // YYYY-MM-DD — only signals on/after this date are shown
+  strictHighlight?: boolean; // M2: badge rows meeting the strict 15-trade / PF 2.5 standard
 }
 
 const fmt = (v: number | null, d = 2) => (v === null || v === undefined ? "—" : v.toFixed(d));
 
-export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, historyStart }: LedgerProps) {
+export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, historyStart, strictHighlight }: LedgerProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [tradesCache, setTradesCache] = useState<Record<string, TradeRecord[]>>({});
   const [loadingKey, setLoadingKey] = useState<string | null>(null);
@@ -204,6 +205,7 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
             }
 
             const avgReturnClass = r.avgReturnPct >= 0 ? "text-success" : "text-danger";
+            const isStrict = r.numTrades >= 15 && r.profitFactor >= 2.5 && r.winRatePct >= 60;
             return (
               <React.Fragment key={rowKey + i}>
                 <tr className={r.liveSignal ? "row-live" : ""}>
@@ -215,6 +217,11 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
                         {r.isSynthetic && (
                           <span style={{ fontSize: "10px", backgroundColor: "rgba(245, 158, 11, 0.15)", color: "#f59e0b", border: "1px solid rgba(245, 158, 11, 0.3)", padding: "0px 4px", borderRadius: "3px", fontWeight: "normal", fontFamily: "monospace" }}>
                             SYNTHETIC
+                          </span>
+                        )}
+                        {strictHighlight && isStrict && (
+                          <span style={{ fontSize: "10px", backgroundColor: "rgba(34, 197, 94, 0.15)", color: "#22c55e", border: "1px solid rgba(34, 197, 94, 0.4)", padding: "0px 5px", borderRadius: "3px", fontWeight: 700, fontFamily: "monospace" }}>
+                            STRICT ✓
                           </span>
                         )}
                       </div>

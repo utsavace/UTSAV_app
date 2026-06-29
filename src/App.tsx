@@ -49,6 +49,7 @@ export default function App() {
   // Search & Filter state
   const [searchQuery, setSearchQuery] = useState("");
   const [liveOnly, setLiveOnly] = useState(false);
+  const [m2Strict, setM2Strict] = useState(true); // M2: highlight rows meeting strict 15/2.5 (default ON)
   const [historyStart, setHistoryStart] = useState(() => {
     const d = new Date();
     d.setFullYear(d.getFullYear() - 5); // default: last 5 years; pick any older date to go further back
@@ -397,6 +398,16 @@ export default function App() {
                 <span className="toggle-dot" />
                 LIVE Signals Only
               </button>
+              {tab === 2 && (
+                <button
+                  className={`toggle-filter-btn ${m2Strict ? "active" : ""}`}
+                  onClick={() => setM2Strict(!m2Strict)}
+                  title="Highlight rounding-bottom rows that also meet the strict standard: 15+ trades & PF >= 2.5"
+                >
+                  <span className="toggle-dot" />
+                  Strict (15 / PF 2.5)
+                </button>
+              )}
               <div className="history-date-box" style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#8e9ba9" }}>
                 <span>Signals since</span>
                 <input
@@ -504,6 +515,7 @@ export default function App() {
             sortAsc={sortAsc}
             onSort={handleSort}
             historyStart={historyStart}
+            strictHighlight={tab === 2 && m2Strict}
           />
         )}
 

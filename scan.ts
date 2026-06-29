@@ -143,6 +143,8 @@ const TICKERS_FALLBACK = [
 const MIN_TRADES = 10;          // 3 was noise; 10 = meetable+meaningful on 5y data
 const MIN_WIN_RATE = 60;        // percent
 const MIN_PROFIT_FACTOR = 2.0;
+const STRICT_TRADES = 15;       // strict gate for strategy modules (M1, M3) + M2 "Strict" highlight
+const STRICT_PF = 2.5;
 export const NO_LOSS_PF_CAP = 10.0;    // cap so 3-trade no-loss runs don't show PF 267
 const YAHOO_RANGE = "max";      // full available history so any past date can be selected
 const SYNTHETIC_DAYS = 5000;    // ~20y of trading days for the fallback path
@@ -857,7 +859,7 @@ export async function runScan(
         log(`⚠️ [FALLBACK DATA] ${stock.symbol} (synthetic)`);
       }
 
-      if (bestB1Stats.passed) {
+      if (bestB1Stats.passed && bestB1Stats.numTrades >= STRICT_TRADES && bestB1Stats.profitFactor >= STRICT_PF) {
         passedCount++;
         module1Rows.push({
           symbol: stock.symbol,
@@ -886,7 +888,7 @@ export async function runScan(
         passedCount++;
         
         // Extract real cup base details from the data!
-        let deepestDepth = 0;
+        let cupDepth = 0;
         let actualDurationMonths = 0;
         let pivotPrice = 0; // base rim = breakout level (resistance)
 
@@ -898,15 +900,14 @@ export async function runScan(
           const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
           // gentle, balanced cup over a ~12-month base (252 trading days)
           if (depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92 && maxRight <= maxLeft * 1.08) {
-            if (depth > deepestDepth) {
-              deepestDepth = depth;
-              actualDurationMonths = 12; // ~252 trading days ≈ 12-month base
-              pivotPrice = Math.max(maxLeft, maxRight); // breakout pivot = base rim resistance
-            }
+            // keep overwriting so we end on the MOST RECENT cup (latest pivot), not the oldest/deepest
+            cupDepth = depth;
+            actualDurationMonths = 12; // ~252 trading days ≈ 12-month base
+            pivotPrice = Math.max(maxLeft, maxRight); // breakout pivot = base rim resistance
           }
         }
-        if (deepestDepth === 0) {
-          deepestDepth = 18;
+        if (cupDepth === 0) {
+          cupDepth = 18;
           actualDurationMonths = 12;
           pivotPrice = b2.lastEntryPrice || closes[closes.length - 1];
         }
@@ -919,7 +920,7 @@ export async function runScan(
           strategyId: "m2_rounding_bottom",
           trades: b2.tradeLog,
           strategyLabel: "Rounding Bottom Base",
-          entryCond: `U-shaped consolidation base depth ${deepestDepth.toFixed(1)}% over ${actualDurationMonths} months, entry ${entryRelation}`,
+          entryCond: `U-shaped consolidation base depth ${cupDepth.toFixed(1)}% over ${actualDurationMonths} months, entry ${entryRelation}`,
           exitCond: "Dynamic measured-move breakout target or trailing stop-loss",
           lastEntryPrice: b2.lastEntryPrice,
           lastExitPrice: b2.lastExitPrice,
@@ -932,10 +933,10 @@ export async function runScan(
           liveSignal: b2.liveSignal,
           livePrice: b2.livePrice,
           isSynthetic: !isReal,
-          patternDepth: deepestDepth,
+          patternDepth: cupDepth,
           patternDuration: actualDurationMonths
         });
-        log(`🎯 [ROUNDING BOTTOM] Base pattern confirmed for ${stock.symbol} (${actualDurationMonths}m base, depth: ${deepestDepth.toFixed(1)}%)`);
+        log(`🎯 [ROUNDING BOTTOM] Base pattern confirmed for ${stock.symbol} (${actualDurationMonths}m base, depth: ${cupDepth.toFixed(1)}%)`);
       }
     }
 
@@ -974,7 +975,7 @@ export async function runScan(
   // Dynamically populate Module 3 rows with the winner strategy results
   for (const res of allScanned) {
     const b3 = res.stratResults[bestGlobalStrategyId];
-    if (b3 && b3.passed) {
+    if (b3 && b3.passed && b3.numTrades >= STRICT_TRADES && b3.profitFactor >= STRICT_PF) {
       module3Rows.push({
         symbol: res.stock.symbol,
         name: res.stock.name,
@@ -1066,8 +1067,8 @@ export async function runScan(
     elapsedSec: parseFloat(((Date.now() - t0) / 1000).toFixed(1)),
     gate: {
       minWinRate: MIN_WIN_RATE / 100,
-      minProfitFactor: MIN_PROFIT_FACTOR,
-      minOosTrades: MIN_TRADES // screens out low-sample flukes
+      minProfitFactor: STRICT_PF,
+      minOosTrades: STRICT_TRADES // headline (strict) standard for M1/M3; M2 uses the lenient base gate with a Strict highlight toggle
     },
     backtestMethod: {
       type: "full-history single-pass",
