@@ -429,11 +429,11 @@ function backtestStrategy(
       } else if (strategyId === "m1_stoch_rsi") {
         trigger = (stochRsi.k[i] || 0) > (stochRsi.d[i] || 0) && (stochRsi.k[i - 1] || 0) <= (stochRsi.d[i - 1] || 0) && (stochRsi.k[i] || 0) < 20 && (adx[i] || 0) > 25;
       } else if (strategyId === "m2_rounding_bottom") {
-        if (i >= 60) {
-          const slice = closes.slice(i - 60, i + 1);
-          const maxLeft = Math.max(...slice.slice(0, 20));
-          const minMiddle = Math.min(...slice.slice(20, 40));
-          const maxRight = Math.max(...slice.slice(40, 60));
+        if (i >= 252) {
+          const slice = closes.slice(i - 252, i + 1);
+          const maxLeft = Math.max(...slice.slice(0, 84));
+          const minMiddle = Math.min(...slice.slice(84, 168));
+          const maxRight = Math.max(...slice.slice(168, 252));
           const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
           trigger = depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92 && maxRight <= maxLeft * 1.08;
         }
@@ -890,24 +890,24 @@ export async function runScan(
         let actualDurationMonths = 0;
         let pivotPrice = 0; // base rim = breakout level (resistance)
 
-        for (let j = 60; j < closes.length; j++) {
-          const slice = closes.slice(j - 60, j + 1);
-          const maxLeft = Math.max(...slice.slice(0, 20));
-          const minMiddle = Math.min(...slice.slice(20, 40));
-          const maxRight = Math.max(...slice.slice(40, 60));
+        for (let j = 252; j < closes.length; j++) {
+          const slice = closes.slice(j - 252, j + 1);
+          const maxLeft = Math.max(...slice.slice(0, 84));
+          const minMiddle = Math.min(...slice.slice(84, 168));
+          const maxRight = Math.max(...slice.slice(168, 252));
           const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
-          // gentle, balanced cup: both rims similar height (rounded base, not a lopsided V)
+          // gentle, balanced cup over a ~12-month base (252 trading days)
           if (depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92 && maxRight <= maxLeft * 1.08) {
             if (depth > deepestDepth) {
               deepestDepth = depth;
-              actualDurationMonths = 3 + (j % 4); // ~3 to 6 months base duration
+              actualDurationMonths = 12; // ~252 trading days ≈ 12-month base
               pivotPrice = Math.max(maxLeft, maxRight); // breakout pivot = base rim resistance
             }
           }
         }
         if (deepestDepth === 0) {
           deepestDepth = 18;
-          actualDurationMonths = 5;
+          actualDurationMonths = 12;
           pivotPrice = b2.lastEntryPrice || closes[closes.length - 1];
         }
 
