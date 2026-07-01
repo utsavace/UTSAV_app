@@ -109,6 +109,41 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
     );
   };
 
+  const renderOOS = (all: TradeRecord[]) => {
+    if (!all || all.length < 12) return null; // need enough trades to split
+    const clean = all.filter((t) => Math.abs(t.returnPct) <= 200); // drop data-glitch outliers
+    const sorted = [...clean].sort((a, b) => a.entryDate.localeCompare(b.entryDate));
+    const k = Math.floor(sorted.length * 0.7);
+    const train = sorted.slice(0, k);
+    const test = sorted.slice(k);
+    if (test.length < 4) return null;
+    const winPct = (t: TradeRecord[]) => (t.length ? Math.round((100 * t.filter((x) => x.win).length) / t.length) : 0);
+    const pf = (t: TradeRecord[]) => {
+      const gp = t.filter((x) => x.returnPct > 0).reduce((sum, x) => sum + x.returnPct, 0);
+      const gl = Math.abs(t.filter((x) => x.returnPct < 0).reduce((sum, x) => sum + x.returnPct, 0));
+      return gl > 0 ? Math.min(gp / gl, 10) : 10;
+    };
+    const trW = winPct(train), teW = winPct(test), trP = pf(train), teP = pf(test);
+    const holds = teW >= trW - 8 && teP >= 1.5;
+    const col = holds ? "#22c55e" : "#f59e0b";
+    const bg = holds ? "rgba(34,197,94,0.08)" : "rgba(245,158,11,0.08)";
+    const bd = holds ? "rgba(34,197,94,0.35)" : "rgba(245,158,11,0.35)";
+    return (
+      <div style={{ marginBottom: "12px", padding: "10px 12px", borderRadius: "8px", background: bg, border: `1px solid ${bd}`, fontFamily: "monospace", fontSize: "12.5px", color: "#c9d3df", textAlign: "left" }}>
+        <div style={{ fontWeight: 700, color: col, marginBottom: "4px" }}>
+          🔬 Out-of-sample check — {holds ? "edge HOLDS in recent data ✓" : "edge DECAYED in recent data ⚠"}
+        </div>
+        <div>
+          Train (first 70%, {train.length} tr): win <strong>{trW}%</strong> · PF <strong>{trP.toFixed(1)}</strong>
+          {" → "}Test (last 30%, {test.length} tr): win <strong>{teW}%</strong> · PF <strong>{teP.toFixed(1)}</strong>
+        </div>
+        <div style={{ color: "#8e9ba9", fontSize: "11px", marginTop: "5px" }}>
+          Strategy is chosen on full history, so “Test” is the closest thing to forward performance. A big drop = the headline number is optimistic.
+        </div>
+      </div>
+    );
+  };
+
   const renderHistory = (r: LedgerRow) => {
     const key = r.tradesKey || `${r.symbol}__${r.strategyId}`;
     const all = tradesCache[key];
@@ -122,6 +157,7 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
       return (
         <div style={{ padding: "12px 14px" }}>
           {renderTodayPlan(r)}
+          {renderOOS(all)}
           <div style={{ color: "#8e9ba9", fontFamily: "monospace", fontSize: "12px" }}>
             No signals found since <strong>{formatDateHuman(historyStart)}</strong> (out of {all.length} total backtest signals).
           </div>
@@ -134,6 +170,7 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
     return (
       <div style={{ padding: "12px 14px" }}>
         {renderTodayPlan(r)}
+        {renderOOS(all)}
         <div style={{ marginBottom: "12px", fontSize: "13px", color: "#c9d3df", fontFamily: "monospace", display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
           <span style={{ backgroundColor: "rgba(59, 130, 246, 0.15)", color: "#60a5fa", border: "1px solid rgba(59, 130, 246, 0.3)", padding: "2px 6px", borderRadius: "4px", fontSize: "11px", fontWeight: "bold" }}>
             DATE FILTER ACTIVE
