@@ -58,6 +58,38 @@ export default function App() {
   const [sortField, setSortField] = useState<keyof LedgerRow | null>(null);
   const [sortAsc, setSortAsc] = useState(false);
 
+  // --- Period P&L Summary ---
+  const [showPnl, setShowPnl] = useState(false);
+  const [allTradesData, setAllTradesData] = useState<any[] | null>(null);
+  const [pnlFrom, setPnlFrom] = useState("2026-01-01");
+  const [pnlTo, setPnlTo] = useState(() => new Date().toISOString().slice(0, 10));
+  const [pnlScope, setPnlScope] = useState<"tab" | "all">("all");
+  useEffect(() => {
+    if (showPnl && allTradesData === null) {
+      fetch(`/cache/alltrades.json?t=${Date.now()}`)
+        .then((r) => (r.ok ? r.json() : []))
+        .then(setAllTradesData)
+        .catch(() => setAllTradesData([]));
+    }
+  }, [showPnl, allTradesData]);
+  const pnl = useMemo(() => {
+    if (!allTradesData) return null;
+    const mod = `m${tab}`;
+    const scoped = allTradesData.filter(
+      (t) => (pnlScope === "all" || t.mod === mod) && t.e >= pnlFrom && t.e <= pnlTo
+    );
+    const n = scoped.length;
+    const wins = scoped.filter((t) => t.w).length;
+    const sum = scoped.reduce((a, t) => a + t.r, 0);
+    return {
+      n, wins, losses: n - wins,
+      wr: n ? Math.round((100 * wins) / n) : 0,
+      sum, avg: n ? sum / n : 0,
+      best: n ? Math.max(...scoped.map((t) => t.r)) : 0,
+      worst: n ? Math.min(...scoped.map((t) => t.r)) : 0,
+    };
+  }, [allTradesData, tab, pnlScope, pnlFrom, pnlTo]);
+
   // Scanning engine states
   const [scanStatus, setScanStatus] = useState<{
     isScanning: boolean;
@@ -421,6 +453,44 @@ export default function App() {
               <div className="rows-count-badge">
                 Showing {filteredAndSortedRows.length} of {rows.length}
               </div>
+            </div>
+          )}
+          {!needsScan && rows.length > 0 && (
+            <div style={{ padding: "4px 0 12px" }}>
+              <button className="toggle-filter-btn" onClick={() => setShowPnl(!showPnl)} style={{ fontSize: "12px" }}>
+                📊 Period P&L Summary {showPnl ? "▲" : "▼"}
+              </button>
+              {showPnl && (
+                <div style={{ marginTop: "10px", padding: "12px 14px", borderRadius: "8px", background: "rgba(59,130,246,0.06)", border: "1px solid rgba(59,130,246,0.25)", fontFamily: "monospace", fontSize: "13px", color: "#c9d3df" }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
+                    <label>From <input type="date" value={pnlFrom} onChange={(e) => setPnlFrom(e.target.value)} style={{ background: "#0f141c", color: "#e6edf5", border: "1px solid #212836", borderRadius: "6px", padding: "4px 8px", fontFamily: "monospace" }} /></label>
+                    <label>To <input type="date" value={pnlTo} onChange={(e) => setPnlTo(e.target.value)} style={{ background: "#0f141c", color: "#e6edf5", border: "1px solid #212836", borderRadius: "6px", padding: "4px 8px", fontFamily: "monospace" }} /></label>
+                    <button className="toggle-filter-btn" onClick={() => setPnlScope("tab")} style={{ opacity: pnlScope === "tab" ? 1 : 0.5 }}>This module</button>
+                    <button className="toggle-filter-btn" onClick={() => setPnlScope("all")} style={{ opacity: pnlScope === "all" ? 1 : 0.5 }}>All 3 modules</button>
+                  </div>
+                  {allTradesData === null ? (
+                    <div style={{ color: "#8e9ba9" }}>Loading trades…</div>
+                  ) : pnl && pnl.n > 0 ? (
+                    <div>
+                      <div style={{ fontSize: "14px", marginBottom: "6px" }}>
+                        <strong>{pnl.n}</strong> trades entered ({pnlScope === "all" ? "all 3 modules" : TABS[tab - 1].label}):{" "}
+                        <span className="text-success">{pnl.wins} win</span> · <span className="text-danger">{pnl.losses} loss</span> · <strong>{pnl.wr}% win rate</strong>
+                      </div>
+                      <div>
+                        Sum of per-trade returns: <strong className={pnl.sum >= 0 ? "text-success" : "text-danger"}>{pnl.sum >= 0 ? "+" : ""}{pnl.sum.toFixed(1)}%</strong>
+                        {"  ·  "}Avg/trade: <strong>{pnl.avg >= 0 ? "+" : ""}{pnl.avg.toFixed(2)}%</strong>
+                        {"  ·  "}Best: <span className="text-success">+{pnl.best.toFixed(1)}%</span>
+                        {"  ·  "}Worst: <span className="text-danger">{pnl.worst.toFixed(1)}%</span>
+                      </div>
+                      <div style={{ color: "#8e9ba9", fontSize: "11px", marginTop: "8px" }}>
+                        Note: “Sum of returns” assumes 1 equal unit per trade — NOT a real compounded portfolio return (trades overlap; ignores position sizing, costs, slippage). Rough edge tally, not account P&L.
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ color: "#8e9ba9" }}>No trades entered between {pnlFrom} and {pnlTo}. (If it says this for every range, redeploy so alltrades.json is generated.)</div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

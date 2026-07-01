@@ -1127,20 +1127,25 @@ export async function runScan(
   // module JSON so the table loads fast; the UI fetches a stock's trades on demand).
   const TRADES_DIR = path.join(CACHE, "trades");
   if (!fs.existsSync(TRADES_DIR)) fs.mkdirSync(TRADES_DIR, { recursive: true });
-  const stripTrades = (rows: any[]) =>
+  const allTrades: any[] = []; // aggregate of every trade (for Period P&L Summary)
+  const stripTrades = (rows: any[], mod: string) =>
     rows.map((r) => {
       const { trades, ...rest } = r;
       const key = `${r.symbol}__${r.strategyId}`;
       if (Array.isArray(trades) && trades.length) {
         fs.writeFileSync(path.join(TRADES_DIR, `${key}.json`), JSON.stringify(trades));
+        for (const t of trades) {
+          allTrades.push({ sym: r.symbol, mod, e: t.entryDate, x: t.exitDate, r: t.returnPct, w: t.win });
+        }
       }
       return { ...rest, tradesKey: key };
     });
 
   fs.writeFileSync(path.join(CACHE, "meta.json"), JSON.stringify(metaData, null, 2));
-  fs.writeFileSync(path.join(CACHE, "module1.json"), JSON.stringify(stripTrades(module1Rows), null, 2));
-  fs.writeFileSync(path.join(CACHE, "module2.json"), JSON.stringify(stripTrades(module2Rows), null, 2));
-  fs.writeFileSync(path.join(CACHE, "module3.json"), JSON.stringify(stripTrades(module3Rows), null, 2));
+  fs.writeFileSync(path.join(CACHE, "module1.json"), JSON.stringify(stripTrades(module1Rows, "m1"), null, 2));
+  fs.writeFileSync(path.join(CACHE, "module2.json"), JSON.stringify(stripTrades(module2Rows, "m2"), null, 2));
+  fs.writeFileSync(path.join(CACHE, "module3.json"), JSON.stringify(stripTrades(module3Rows, "m3"), null, 2));
+  fs.writeFileSync(path.join(CACHE, "alltrades.json"), JSON.stringify(allTrades));
 
   log(`✅ Scan complete! Processed ${totalStocks} stocks (${realDataCount} real, ${syntheticCount} synthetic)`);
 }
