@@ -437,7 +437,9 @@ function backtestStrategy(
           const minMiddle = Math.min(...slice.slice(84, 168));
           const maxRight = Math.max(...slice.slice(168, 252));
           const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
-          trigger = depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92 && maxRight <= maxLeft * 1.08;
+          const pivot = maxLeft; // left-rim resistance = the breakout pivot
+          const nearBreakout = price >= pivot * 0.97 && price <= pivot * 1.01; // pre-breakout zone: 3% below to 1% above pivot
+          trigger = depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92 && maxRight <= maxLeft * 1.08 && nearBreakout;
         }
       } else if (strategyId === "m3_best_overall") {
         trigger = (ema9[i] || 0) > (ema21[i] || 0) && (ema9[i - 1] || 0) <= (ema21[i - 1] || 0) && (macd.macdLine[i] || 0) > (macd.signalLine[i] || 0);
@@ -903,7 +905,7 @@ export async function runScan(
             // keep overwriting so we end on the MOST RECENT cup (latest pivot), not the oldest/deepest
             cupDepth = depth;
             actualDurationMonths = 12; // ~252 trading days ≈ 12-month base
-            pivotPrice = Math.max(maxLeft, maxRight); // breakout pivot = base rim resistance
+            pivotPrice = maxLeft; // breakout pivot = left-rim resistance
           }
         }
         if (cupDepth === 0) {
@@ -912,7 +914,7 @@ export async function runScan(
           pivotPrice = b2.lastEntryPrice || closes[closes.length - 1];
         }
 
-        const entryRelation = `on breakout above ₹${Math.round(pivotPrice)} pivot`;
+        const entryRelation = `as price nears the ₹${Math.round(pivotPrice)} breakout pivot (pre-breakout)`;
 
         module2Rows.push({
           symbol: stock.symbol,
@@ -921,7 +923,7 @@ export async function runScan(
           trades: b2.tradeLog,
           strategyLabel: "Rounding Bottom Base",
           entryCond: `U-shaped consolidation base depth ${cupDepth.toFixed(1)}% over ${actualDurationMonths} months, entry ${entryRelation}`,
-          exitCond: "Dynamic measured-move breakout target or trailing stop-loss",
+          exitCond: "Exit at +15% target or −5% stop-loss",
           lastEntryPrice: b2.lastEntryPrice,
           lastExitPrice: b2.lastExitPrice,
           lastReturnPct: b2.lastReturnPct,
