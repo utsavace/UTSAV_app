@@ -10,7 +10,12 @@ interface Meta {
   scanned?: number;
   withData?: number;
   elapsedSec?: number;
-  gate?: { minWinRate: number; minProfitFactor: number; minOosTrades: number };
+  gate?: {
+    minWinRate: number;
+    minProfitFactor: number;
+    minOosTrades: number;
+    strict?: { minProfitFactor: number; minOosTrades: number };
+  };
   walkForward?: { trainFrac: number; note: string };
   backtestMethod?: { type: string; note: string };
   module3?: {
@@ -61,7 +66,7 @@ export default function App() {
   // --- Period P&L Summary ---
   const [showPnl, setShowPnl] = useState(false);
   const [allTradesData, setAllTradesData] = useState<any[] | null>(null);
-  const [pnlFrom, setPnlFrom] = useState("2026-01-01");
+  const [pnlFrom, setPnlFrom] = useState(() => `${new Date().getFullYear()}-01-01`);
   const [pnlTo, setPnlTo] = useState(() => new Date().toISOString().slice(0, 10));
   const [pnlScope, setPnlScope] = useState<"tab" | "all">("all");
   useEffect(() => {
@@ -144,19 +149,36 @@ export default function App() {
     startScanning(); // scan first; the polling effect calls publishCache() when it finishes
   };
 
+  // Prefer the server's VALIDATED endpoints (/api/*) — they run staleness checks against
+  // the recorded gates. Fall back to the static /cache files only if the API is
+  // unreachable (pure static hosting). Previously the API existed but was never called,
+  // so the whole validation layer was dead code.
+  const fetchMeta = (): Promise<Meta> =>
+    fetch(`/api/meta?t=${Date.now()}`)
+      .then((r) => { if (!r.ok) throw new Error("api down"); return r.json(); })
+      .catch(() =>
+        fetch(`/cache/meta.json?t=${Date.now()}`)
+          .then((r) => { if (!r.ok) throw new Error("no cache"); return r.json(); })
+      );
+
+  const fetchModule = (n: number): Promise<LedgerRow[]> =>
+    fetch(`/api/module/${n}?t=${Date.now()}`)
+      .then((r) => { if (!r.ok) throw new Error("api down"); return r.json(); })
+      .then((d) => (Array.isArray(d) ? d : Array.isArray(d.rows) ? d.rows : []))
+      .catch(() =>
+        fetch(`/cache/module${n}.json?t=${Date.now()}`)
+          .then((r) => { if (!r.ok) throw new Error("no cache"); return r.json(); })
+          .then((d) => (Array.isArray(d) ? d : []))
+      );
+
   useEffect(() => {
-    // Read from static bundled cache → works on AI Studio / any static host (no live server needed).
-    fetch(`/cache/meta.json?t=${Date.now()}`)
-      .then((r) => { if (!r.ok) throw new Error("no cache"); return r.json(); })
-      .then(setMeta)
-      .catch(() => setMeta({ needsScan: true }));
+    fetchMeta().then(setMeta).catch(() => setMeta({ needsScan: true }));
   }, []);
 
   useEffect(() => {
     setLoading(true);
-    fetch(`/cache/module${tab}.json?t=${Date.now()}`)
-      .then((r) => { if (!r.ok) throw new Error("no cache"); return r.json(); })
-      .then((d) => setRows(Array.isArray(d) ? d : []))
+    fetchModule(tab)
+      .then(setRows)
       .catch(() => setRows([]))
       .finally(() => setLoading(false));
   }, [tab]);
@@ -178,15 +200,10 @@ export default function App() {
               logs: data.logs || []
             });
             if (!data.isScanning && data.progress === 100) {
-              // Reload from freshly-written static cache (cache-busted)
-              fetch(`/cache/meta.json?t=${Date.now()}`)
-                .then((r) => r.json())
-                .then(setMeta)
-                .catch(() => {});
-              fetch(`/cache/module${tab}.json?t=${Date.now()}`)
-                .then((r) => r.json())
-                .then((d) => setRows(Array.isArray(d) ? d : []))
-                .catch(() => {});
+              // Reload the freshly-written cache through the validated endpoints
+              fetchMeta().then(setMeta).catch(() => {});
+              fetchModule(tab).then(setRows).catch(() => {});
+              setAllTradesData(null); // force P&L panel to re-fetch fresh alltrades.json
               
               if (publishAfterScan.current) {
                 publishAfterScan.current = false;
@@ -300,7 +317,7 @@ export default function App() {
           <div className="gatestamp">
             <span className="gate-label">STRICT GATE</span>
             <span className="gate-rules">
-              Win &gt; {g ? g.minWinRate * 100 : 60}% &amp; PF &gt; {g ? g.minProfitFactor : 2}
+              Win &gt; {g ? g.minWinRate * 100 : 60}% &amp; PF &gt; {g?.strict?.minProfitFactor ?? g?.minProfitFactor ?? 2.5}
             </span>
           </div>
         </div>
@@ -561,7 +578,7 @@ export default function App() {
                 <div className="big">No matches in this view</div>
                 <p>
                   {rows.length} stock{rows.length === 1 ? "" : "s"} cleared the gate, but none match your current filters
-                  {liveOnly ? " — no LIVE entry signal in the last 4 days" : ""}. Clear filters to see them.
+                  {liveOnly ? " — no LIVE entry signal in the last 5 sessions" : ""}. Clear filters to see them.
                 </p>
               </>
             )}
@@ -667,7 +684,7 @@ export default function App() {
             <div className="flex-1 p-4 overflow-y-auto bg-[#05070a] font-mono text-xs text-[#10b981] min-h-[250px] max-h-[350px] leading-relaxed flex flex-col-reverse rounded-b-lg">
               <div>
                 {scanStatus.logs.slice().reverse().map((logLine, idx) => (
-                  <div key={idx} className={`py-0.5 ${logLine.includes("[GATE PASS]") ? "text-[#fbbf24] font-bold" : logLine.includes("[ROUNDING") ? "text-[#3b82f6] font-bold" : logLine.includes("✅") ? "text-[#10b981] font-bold" : "text-[#8e9ba9]"}`}>
+                  <div key={idx} className={`py-0.5 ${logLine.includes("[AI OPTIMIZER PASS]") ? "text-[#fbbf24] font-bold" : logLine.includes("[ROUNDING") ? "text-[#3b82f6] font-bold" : logLine.includes("✅") ? "text-[#10b981] font-bold" : "text-[#8e9ba9]"}`}>
                     <span className="text-[#576575] mr-2">[{new Date().toLocaleTimeString()}]</span>
                     {logLine}
                   </div>

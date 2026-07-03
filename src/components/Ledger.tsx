@@ -86,15 +86,20 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
   const renderTodayPlan = (r: LedgerRow) => {
     if (r.liveSignal && r.livePrice) {
       const entry = r.livePrice;
-      const stop = Math.round(entry * 0.92);
-      const target = Math.round(entry * (1 + r.avgReturnPct / 100));
+      // M2's tested rule is a −5% stop / +15% target; showing −8% here contradicted the
+      // strategy that produced the stats. Other strategies keep the generic −8% guard.
+      const isM2 = r.strategyId === "m2_rounding_bottom";
+      const stopPct = isM2 ? 5 : 8;
+      const stop = Math.round(entry * (1 - stopPct / 100));
+      const target = isM2 ? Math.round(entry * 1.15) : Math.round(entry * (1 + r.avgReturnPct / 100));
+      const targetLabel = isM2 ? "+15% rule" : `+${r.avgReturnPct.toFixed(1)}% avg`;
       const risk = entry - stop;
       const reward = target - entry;
       const rr = risk > 0 ? (reward / risk).toFixed(1) : "—";
       return (
         <div style={{ marginBottom: "12px", padding: "10px 12px", borderRadius: "8px", background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.35)", fontFamily: "monospace", fontSize: "12.5px", color: "#c9f5d6" }}>
           <div style={{ fontWeight: 700, color: "#22c55e", marginBottom: "4px" }}>📍 LIVE setup (as of latest close)</div>
-          <div>Entry zone ≈ <strong>₹{entry}</strong> · Stop-loss <strong>₹{stop}</strong> (−8%) · Target ≈ <strong>₹{target}</strong> (+{r.avgReturnPct.toFixed(1)}% avg) · R:R ≈ 1:{rr}</div>
+          <div>Entry zone ≈ <strong>₹{entry}</strong> · Stop-loss <strong>₹{stop}</strong> (−{stopPct}%) · Target ≈ <strong>₹{target}</strong> ({targetLabel}) · R:R ≈ 1:{rr}</div>
           <div style={{ color: "#8e9ba9", fontSize: "11px", marginTop: "5px" }}>Enter only if price is still near the entry zone (not already run up). Backtest-derived levels — educational, not financial advice.</div>
         </div>
       );

@@ -17,6 +17,8 @@ interface TradeRecord {
   exitPrice: number;
   returnPct: number;
   win: boolean;
+  depthPct?: number;    // m2 only: depth of the cup base active at entry
+  durationM?: number;   // m2 only: base duration (≈months) active at entry
 }
 
 interface MACDResult {
@@ -148,6 +150,9 @@ const STRICT_PF = 2.5;
 export const NO_LOSS_PF_CAP = 10.0;    // cap so 3-trade no-loss runs don't show PF 267
 const YAHOO_RANGE = "max";      // full available history so any past date can be selected
 const SYNTHETIC_DAYS = 5000;    // ~20y of trading days for the fallback path
+const COST_PCT = 0.2;           // round-trip cost + slippage per trade (%) subtracted from every return
+const FETCH_RETRIES = 3;        // Yahoo retry attempts with backoff (rate-limit resilience)
+const CUP_WINDOWS = [252, 189, 126]; // rounding-bottom base windows ≈ 12 / 9 / 6 months (longest preferred)
 
 const STRATEGIES_POOL = [
   { id: "m1_rsi_macd", label: "RSI(14) + MACD Cross", entry: "RSI < 40 and MACD histogram turns positive in oversold zone", exit: "RSI > 70 or MACD histogram < 0" },
@@ -374,6 +379,26 @@ function calculateADX(historicalData: OHLCV[], period: number = 14): number[] {
   return adx;
 }
 
+// ---------------- ROUNDING BOTTOM (CUP) DETECTOR ----------------
+// Scans multiple base windows (≈12/9/6 months) at bar i. Returns the matched cup
+// (longest window preferred) or null. Used both for entries and for row metadata,
+// so per-trade depth/duration in the research buckets is REAL, not hard-coded.
+function detectCup(closes: number[], i: number): { depth: number; months: number; pivot: number } | null {
+  for (const w of CUP_WINDOWS) {
+    if (i < w) continue;
+    const slice = closes.slice(i - w, i + 1);
+    const third = Math.floor(w / 3);
+    const maxLeft = Math.max(...slice.slice(0, third));
+    const minMiddle = Math.min(...slice.slice(third, 2 * third));
+    const maxRight = Math.max(...slice.slice(2 * third, w));
+    const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
+    if (depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92 && maxRight <= maxLeft * 1.08) {
+      return { depth, months: Math.round(w / 21), pivot: maxLeft };
+    }
+  }
+  return null;
+}
+
 // ---------------- COMPREHENSIVE BACKTEST RUNNER ----------------
 
 function backtestStrategy(
@@ -404,7 +429,13 @@ function backtestStrategy(
   let lastTradeExit: number | null = null;
   let lastTradeReturn: number | null = null;
 
-  // EMA volume average calculation
+  // No-look-ahead execution: a signal on bar i is EXECUTED at bar i+1's open.
+  let pendingEntry = false;
+  let pendingCup: { depth: number; months: number } | null = null; // m2 cup matched at signal time
+  let entryCup: { depth: number; months: number } | null = null;   // m2 cup for the open position
+  let signalOnLastBar = false; // fresh trigger on the latest close → actionable LIVE signal
+
+  // 20-day SMA volume average calculation
   const avgVol20: number[] = [];
   let volSum = 0;
   for (let i = 0; i < ohlcv.length; i++) {
@@ -416,6 +447,17 @@ function backtestStrategy(
   for (let i = 50; i < ohlcv.length; i++) {
     const price = closes[i];
     if (!inPosition) {
+      // Execute the previous bar's signal at TODAY's open (removes same-bar look-ahead bias)
+      if (pendingEntry) {
+        inPosition = true;
+        entryPrice = opens[i];
+        entryDate = dates[i];
+        entryCup = pendingCup;
+        pendingEntry = false;
+        pendingCup = null;
+        continue; // exits are evaluated from the next bar onward
+      }
+
       let trigger = false;
       if (strategyId === "m1_rsi_macd") {
         trigger = rsi[i] < 40 && (macd.histogram[i] || 0) > 0 && (macd.histogram[i - 1] || 0) <= 0;
@@ -431,27 +473,29 @@ function backtestStrategy(
       } else if (strategyId === "m1_stoch_rsi") {
         trigger = (stochRsi.k[i] || 0) > (stochRsi.d[i] || 0) && (stochRsi.k[i - 1] || 0) <= (stochRsi.d[i - 1] || 0) && (stochRsi.k[i] || 0) < 20 && (adx[i] || 0) > 25;
       } else if (strategyId === "m2_rounding_bottom") {
-        if (i >= 252) {
-          const slice = closes.slice(i - 252, i + 1);
-          const maxLeft = Math.max(...slice.slice(0, 84));
-          const minMiddle = Math.min(...slice.slice(84, 168));
-          const maxRight = Math.max(...slice.slice(168, 252));
-          const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
-          const pivot = maxLeft; // left-rim resistance = the breakout pivot
-          const nearBreakout = price >= pivot * 0.97 && price <= pivot * 1.01; // pre-breakout zone: 3% below to 1% above pivot
-          trigger = depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92 && maxRight <= maxLeft * 1.08 && nearBreakout;
+        const cup = detectCup(closes, i);
+        if (cup) {
+          const nearBreakout = price >= cup.pivot * 0.97 && price <= cup.pivot * 1.01; // pre-breakout zone: 3% below to 1% above pivot
+          if (nearBreakout) {
+            trigger = true;
+            pendingCup = { depth: cup.depth, months: cup.months };
+          }
         }
       } else if (strategyId === "m3_best_overall") {
         trigger = (ema9[i] || 0) > (ema21[i] || 0) && (ema9[i - 1] || 0) <= (ema21[i - 1] || 0) && (macd.macdLine[i] || 0) > (macd.signalLine[i] || 0);
       }
 
       if (trigger) {
-        inPosition = true;
-        entryPrice = price;
-        entryDate = dates[i];
+        if (i === ohlcv.length - 1) {
+          // Signal formed on the LATEST close → nothing to backfill, but this IS the live setup
+          signalOnLastBar = true;
+        } else {
+          pendingEntry = true;
+        }
       }
     } else {
       let exit = false;
+      let exitPrice = price; // default: exit at close of the exit bar
       if (strategyId === "m1_rsi_macd") {
         exit = rsi[i] > 70 || (macd.histogram[i] || 0) < 0;
       } else if (strategyId === "m1_ema_pullback") {
@@ -465,28 +509,58 @@ function backtestStrategy(
       } else if (strategyId === "m1_stoch_rsi") {
         exit = (stochRsi.k[i] || 0) < (stochRsi.d[i] || 0) && (stochRsi.k[i] || 0) > 80;
       } else if (strategyId === "m2_rounding_bottom") {
-        exit = price >= entryPrice * 1.15 || price <= entryPrice * 0.95;
+        // Intraday-aware stop/target (close-only checks understated real stop-loss damage)
+        const stopP = entryPrice * 0.95;
+        const tgtP = entryPrice * 1.15;
+        if (opens[i] <= stopP) { exit = true; exitPrice = opens[i]; }        // gap below stop → filled at open
+        else if (lows[i] <= stopP) { exit = true; exitPrice = stopP; }       // stop hit intraday
+        else if (opens[i] >= tgtP) { exit = true; exitPrice = opens[i]; }    // gap above target
+        else if (highs[i] >= tgtP) { exit = true; exitPrice = tgtP; }        // target hit intraday
       } else if (strategyId === "m3_best_overall") {
         exit = (ema9[i] || 0) < (ema21[i] || 0) || (macd.macdLine[i] || 0) < (macd.signalLine[i] || 0);
       }
 
       if (exit || i === ohlcv.length - 1) {
+        if (!exit) exitPrice = price; // force-close still-open position at the latest close
         inPosition = false;
-        const returnPct = ((price - entryPrice) / entryPrice) * 100;
+        const returnPct = ((exitPrice - entryPrice) / entryPrice) * 100 - COST_PCT; // net of costs/slippage
         trades.push(returnPct);
         tradeLog.push({
           entryDate,
           exitDate: dates[i],
           entryPrice: Math.round(entryPrice * 100) / 100,
-          exitPrice: Math.round(price * 100) / 100,
+          exitPrice: Math.round(exitPrice * 100) / 100,
           returnPct: Math.round(returnPct * 100) / 100,
-          win: returnPct > 0
+          win: returnPct > 0,
+          ...(entryCup ? { depthPct: Math.round(entryCup.depth * 10) / 10, durationM: entryCup.months } : {})
         });
         lastTradeEntry = entryPrice;
-        lastTradeExit = price;
+        lastTradeExit = exitPrice;
         lastTradeReturn = returnPct;
+        entryCup = null;
       }
     }
+  }
+
+  // A pending signal executed at the LAST bar's open leaves the loop with an open position
+  // (the in-loop force-close can't see it). Log it so the freshest entry is never dropped.
+  if (inPosition) {
+    const lastP = closes[closes.length - 1];
+    const returnPct = ((lastP - entryPrice) / entryPrice) * 100 - COST_PCT;
+    trades.push(returnPct);
+    tradeLog.push({
+      entryDate,
+      exitDate: dates[dates.length - 1],
+      entryPrice: Math.round(entryPrice * 100) / 100,
+      exitPrice: Math.round(lastP * 100) / 100,
+      returnPct: Math.round(returnPct * 100) / 100,
+      win: returnPct > 0,
+      ...(entryCup ? { depthPct: Math.round(entryCup.depth * 10) / 10, durationM: entryCup.months } : {})
+    });
+    lastTradeEntry = entryPrice;
+    lastTradeExit = lastP;
+    lastTradeReturn = returnPct;
+    inPosition = false;
   }
 
   const numTrades = trades.length;
@@ -502,8 +576,8 @@ function backtestStrategy(
       lastEntryPrice: lastP,
       lastExitPrice: lastP,
       lastReturnPct: 0,
-      liveSignal: false,
-      livePrice: null,
+      liveSignal: signalOnLastBar,
+      livePrice: signalOnLastBar ? Math.round(lastP) : null,
       tradeLog: []
     };
   }
@@ -532,9 +606,10 @@ function backtestStrategy(
   const lastExitPrice = lastTradeExit !== null ? lastTradeExit : (closes[closes.length - 1] || 0);
   const lastReturnPct = lastTradeReturn !== null ? lastTradeReturn : 0;
 
-  const lastDayIndex = ohlcv.length - 1;
-  let liveSignal = false;
-  if (tradeLog.length > 0) {
+  // LIVE = (a) a fresh trigger on the very latest close (enter at tomorrow's open), OR
+  //        (b) a still-open position entered within the last 5 sessions.
+  let liveSignal = signalOnLastBar;
+  if (!liveSignal && tradeLog.length > 0) {
     const lastTrade = tradeLog[tradeLog.length - 1];
     const entryIdx = dates.indexOf(lastTrade.entryDate);
     const isRecentEntry = entryIdx !== -1 && (dates.length - 1 - entryIdx) <= 5;
@@ -643,27 +718,40 @@ function parseYahooChart(jsonData: any): OHLCV[] {
 // ---------------- LIVE YAHOO FINANCE DATA GETTER ----------------
 
 async function fetchStockData(symbol: string): Promise<OHLCV[] | null> {
-  try {
-    const period2 = Math.floor(Date.now() / 1000);
-    const period1 = Math.floor(new Date("2005-01-01T00:00:00Z").getTime() / 1000);
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000); // 8s cap so a blocked network can't hang the scan
-    const res = await (globalThis as any).fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      }
-    });
-    clearTimeout(timer);
+  const period2 = Math.floor(Date.now() / 1000);
+  const period1 = Math.floor(new Date("2005-01-01T00:00:00Z").getTime() / 1000);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d`;
 
-    if (!res.ok) return null;
-    const jsonData = await res.json();
-    const ohlcv = parseYahooChart(jsonData);
-    return ohlcv.length > 35 ? ohlcv : null;
-  } catch (e) {
-    return null;
+  // Retry with exponential backoff + jitter — 500 tickers × parallel fetches WILL hit
+  // Yahoo rate limits sometimes; without retries half the universe silently degrades
+  // to synthetic data.
+  for (let attempt = 1; attempt <= FETCH_RETRIES; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000); // 8s cap so a blocked network can't hang the scan
+      const res = await (globalThis as any).fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+      });
+      clearTimeout(timer);
+
+      if (res.ok) {
+        const jsonData = await res.json();
+        const ohlcv = parseYahooChart(jsonData);
+        if (ohlcv.length > 35) return ohlcv;
+        return null; // valid response but not enough data — retrying won't help
+      }
+      // 429/5xx → fall through to backoff & retry
+    } catch (e) {
+      // network error / timeout → backoff & retry
+    }
+    if (attempt < FETCH_RETRIES) {
+      await new Promise(r => setTimeout(r, 700 * attempt + Math.random() * 500));
+    }
   }
+  return null;
 }
 
 // ---------------- NIFTY 500 CONSTITUENTS LOADER ----------------
@@ -785,8 +873,8 @@ export async function runScan(
     const startIdx = step * batchSize;
     const endIdx = Math.min(totalStocks, startIdx + batchSize);
 
-    // Choose representative stock for the progress logs
-    const repStock = tickers[step % tickers.length];
+    // Representative stock for the progress logs = first ticker of THIS batch
+    const repStock = tickers[startIdx];
     currentSymbol = repStock.symbol;
     scannedCount = endIdx;
 
@@ -795,7 +883,7 @@ export async function runScan(
     // Fetch and analyze the batch in parallel (highly optimized!)
     const batchPromises = [];
     for (let i = startIdx; i < endIdx; i++) {
-      const stock = tickers[i % tickers.length];
+      const stock = tickers[i];
       batchPromises.push((async () => {
         let ohlcv = await fetchStockData(stock.symbol);
         let isReal = true;
@@ -889,28 +977,26 @@ export async function runScan(
       if (b2.passed) {
         passedCount++;
         
-        // Extract real cup base details from the data!
+        // Extract real cup base details — MOST RECENT cup across all base windows (≈6/9/12m)
         let cupDepth = 0;
         let actualDurationMonths = 0;
         let pivotPrice = 0; // base rim = breakout level (resistance)
 
-        for (let j = 252; j < closes.length; j++) {
-          const slice = closes.slice(j - 252, j + 1);
-          const maxLeft = Math.max(...slice.slice(0, 84));
-          const minMiddle = Math.min(...slice.slice(84, 168));
-          const maxRight = Math.max(...slice.slice(168, 252));
-          const depth = ((maxLeft - minMiddle) / maxLeft) * 100;
-          // gentle, balanced cup over a ~12-month base (252 trading days)
-          if (depth >= 12 && depth <= 33 && maxRight >= maxLeft * 0.92 && maxRight <= maxLeft * 1.08) {
-            // keep overwriting so we end on the MOST RECENT cup (latest pivot), not the oldest/deepest
-            cupDepth = depth;
-            actualDurationMonths = 12; // ~252 trading days ≈ 12-month base
-            pivotPrice = maxLeft; // breakout pivot = left-rim resistance
+        for (let j = closes.length - 1; j >= CUP_WINDOWS[CUP_WINDOWS.length - 1]; j--) {
+          const cup = detectCup(closes, j);
+          if (cup) {
+            cupDepth = cup.depth;
+            actualDurationMonths = cup.months;
+            pivotPrice = cup.pivot;
+            break; // scanning backwards → first hit IS the latest cup
           }
         }
         if (cupDepth === 0) {
-          cupDepth = 18;
-          actualDurationMonths = 12;
+          // No cup visible on the latest data (trades came from older bases) — fall back to
+          // the LAST TRADE's recorded pattern instead of inventing numbers.
+          const lastT = b2.tradeLog[b2.tradeLog.length - 1];
+          cupDepth = lastT?.depthPct ?? 18;
+          actualDurationMonths = lastT?.durationM ?? 12;
           pivotPrice = b2.lastEntryPrice || closes[closes.length - 1];
         }
 
@@ -948,29 +1034,37 @@ export async function runScan(
 
   log("📊 Compiling global technical indicators...");
   await new Promise(r => setTimeout(r, 300));
-  log("💾 Saving walk-forward evaluation cache layers...");
+  log("💾 Saving backtest evaluation cache layers...");
 
   const nowString = new Date().toISOString();
-  const metaSr = new SeededRandom("global_metadata_seed");
 
-  // Count strategy occurrences in Module 1 to determine the absolute most robust strategy across the universe!
-  const strategyCounts: Record<string, number> = {};
-  for (const r of module1Rows) {
-    strategyCounts[r.strategyLabel] = (strategyCounts[r.strategyLabel] || 0) + 1;
-  }
+  // Module 3 winner = the strategy with the MOST gate-passes across the whole universe
+  // (breadth). This is the same metric the breadth chart shows, so the "Best Universe
+  // Edge" card can never contradict its own chart. Median PF of passers breaks ties.
+  const median = (arr: number[]) => {
+    if (!arr.length) return 0;
+    const s = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  };
 
-  let bestGlobalStrategyLabel = STRATEGIES_POOL[0].label;
-  let bestGlobalStrategyId = STRATEGIES_POOL[0].id;
-  let bestGlobalStrategyCount = 0;
+  const breadthStats = STRATEGIES_POOL.map(s => {
+    const passers = allScanned.filter(res => res.stratResults[s.id]?.passed);
+    const passingPfs = passers
+      .map(res => res.stratResults[s.id].profitFactor)
+      .filter((pf: number) => isFinite(pf) && pf > 0);
+    return { id: s.id, label: s.label, gatePasses: passers.length, medianPF: median(passingPfs) };
+  });
 
-  for (const strat of STRATEGIES_POOL) {
-    const count = strategyCounts[strat.label] || 0;
-    if (count > bestGlobalStrategyCount) {
-      bestGlobalStrategyCount = count;
-      bestGlobalStrategyLabel = strat.label;
-      bestGlobalStrategyId = strat.id;
+  let bestBreadth = breadthStats[0];
+  for (const b of breadthStats) {
+    if (b.gatePasses > bestBreadth.gatePasses ||
+        (b.gatePasses === bestBreadth.gatePasses && b.medianPF > bestBreadth.medianPF)) {
+      bestBreadth = b;
     }
   }
+  const bestGlobalStrategyLabel = bestBreadth.label;
+  const bestGlobalStrategyId = bestBreadth.id;
 
   const winningStratConfig = STRATEGIES_POOL.find(s => s.id === bestGlobalStrategyId)!;
 
@@ -1001,36 +1095,38 @@ export async function runScan(
     }
   }
 
-  // Categorize rounding bottom rows dynamically for our research buckets!
+  // Research buckets built from PER-TRADE cup metadata (each trade carries the depth &
+  // duration of the base it actually traded), on REAL data only — synthetic fallback
+  // rows would poison a "research" statistic.
   const depthBuckets = [
     { range: "12% - 19%", min: 12, max: 19, trades: 0, wins: 0 },
     { range: "19% - 26%", min: 19, max: 26, trades: 0, wins: 0 },
-    { range: "26% - 33%", min: 26, max: 33, trades: 0, wins: 0 }
+    { range: "26% - 33%", min: 26, max: 33.001, trades: 0, wins: 0 } // .001 so exactly-33% doesn't fall between buckets
   ];
 
   const durationBuckets = [
-    { range: "3 - 6 Months", min: 3, max: 6, trades: 0, wins: 0 },
-    { range: "6 - 12 Months", min: 6, max: 12, trades: 0, wins: 0 },
-    { range: "12+ Months", min: 12, max: 99, trades: 0, wins: 0 }
+    { range: "≈6 Month Base", min: 0, max: 7.5, trades: 0, wins: 0 },
+    { range: "≈9 Month Base", min: 7.5, max: 10.5, trades: 0, wins: 0 },
+    { range: "≈12 Month Base", min: 10.5, max: 99, trades: 0, wins: 0 }
   ];
 
   for (const r of module2Rows) {
-    const d = r.patternDepth || 22.4;
-    const m = r.patternDuration || 6;
-    const wr = r.winRatePct;
-    const nt = r.numTrades;
-    const winTrades = Math.round((wr / 100) * nt);
-
-    for (const b of depthBuckets) {
-      if (d >= b.min && d < b.max) {
-        b.trades += nt;
-        b.wins += winTrades;
+    if (r.isSynthetic) continue;
+    for (const t of r.trades as TradeRecord[]) {
+      const d = t.depthPct ?? r.patternDepth;
+      const m = t.durationM ?? r.patternDuration;
+      if (d === undefined || m === undefined) continue;
+      for (const b of depthBuckets) {
+        if (d >= b.min && d < b.max) {
+          b.trades += 1;
+          if (t.win) b.wins += 1;
+        }
       }
-    }
-    for (const b of durationBuckets) {
-      if (m >= b.min && m < b.max) {
-        b.trades += nt;
-        b.wins += winTrades;
+      for (const b of durationBuckets) {
+        if (m >= b.min && m < b.max) {
+          b.trades += 1;
+          if (t.win) b.wins += 1;
+        }
       }
     }
   }
@@ -1068,45 +1164,29 @@ export async function runScan(
     },
     elapsedSec: parseFloat(((Date.now() - t0) / 1000).toFixed(1)),
     gate: {
+      // Base gate — what EVERY published row satisfies (M2 rows use exactly this).
       minWinRate: MIN_WIN_RATE / 100,
-      minProfitFactor: STRICT_PF,
-      minOosTrades: STRICT_TRADES // headline (strict) standard for M1/M3; M2 uses the lenient base gate with a Strict highlight toggle
+      minProfitFactor: MIN_PROFIT_FACTOR,
+      minOosTrades: MIN_TRADES,
+      // Strict gate — the tougher standard applied to M1/M3 rows.
+      strict: {
+        minProfitFactor: STRICT_PF,
+        minOosTrades: STRICT_TRADES
+      }
     },
     backtestMethod: {
       type: "full-history single-pass",
-      note: `Full available-history daily backtest (single-pass, no walk-forward / out-of-sample split). Real indicators with strict edge filtering: ${MIN_WIN_RATE}%+ win rate, ${MIN_PROFIT_FACTOR}+ profit factor, ${MIN_TRADES}+ trades. Gross returns — no costs/slippage.`
+      note: `Full available-history daily backtest. Signals execute at the NEXT bar's open (no same-bar look-ahead). Net returns after ${COST_PCT}% round-trip cost/slippage per trade. Edge filter: ${MIN_WIN_RATE}%+ win rate, ${MIN_PROFIT_FACTOR}+ profit factor, ${MIN_TRADES}+ trades (M1/M3 strict: ${STRICT_PF}+ PF, ${STRICT_TRADES}+ trades). No walk-forward split — see per-stock OOS check in the UI.`
     },
     module3: {
       chosenStrategyLabel: bestGlobalStrategyLabel,
-      gatePasses: bestGlobalStrategyCount || module3Rows.length,
-      breadth: STRATEGIES_POOL.map(s => {
-        const passes = allScanned.filter(res => res.stratResults[s.id]?.passed).length;
-        const passingPfs = allScanned
-          .filter(res => res.stratResults[s.id]?.passed)
-          .map(res => res.stratResults[s.id].profitFactor)
-          .filter(pf => isFinite(pf) && pf > 0);
-        
-        let avgPF = 1.0;
-        if (passingPfs.length > 0) {
-          avgPF = passingPfs.reduce((sum, pf) => sum + pf, 0) / passingPfs.length;
-        } else {
-          const allPfs = allScanned
-            .map(res => res.stratResults[s.id]?.profitFactor)
-            .filter(pf => isFinite(pf) && pf > 0);
-          if (allPfs.length > 0) {
-            avgPF = allPfs.reduce((sum, pf) => sum + pf, 0) / allPfs.length;
-          }
-        }
-
-        return {
-          label: s.label,
-          gatePasses: passes,
-          medianPF: parseFloat(avgPF.toFixed(2))
-        };
-      }).sort((a, b) => b.gatePasses - a.gatePasses)
+      gatePasses: bestBreadth.gatePasses, // same metric as the breadth chart → never contradicts it
+      breadth: breadthStats
+        .map(b => ({ label: b.label, gatePasses: b.gatePasses, medianPF: parseFloat(b.medianPF.toFixed(2)) }))
+        .sort((a, b) => b.gatePasses - a.gatePasses)
     },
     roundingBottomConditions: {
-      totalTrades: module2Rows.reduce((sum, r) => sum + r.numTrades, 0) || 120,
+      totalTrades: module2Rows.reduce((sum, r) => sum + r.numTrades, 0),
       byDepth: {
         label: "Cup Base Depth (Max Drawdown in Base)",
         buckets: byDepthBuckets
@@ -1126,7 +1206,10 @@ export async function runScan(
   // Write each stock's full dated trade history to its own file (kept out of the main
   // module JSON so the table loads fast; the UI fetches a stock's trades on demand).
   const TRADES_DIR = path.join(CACHE, "trades");
-  if (!fs.existsSync(TRADES_DIR)) fs.mkdirSync(TRADES_DIR, { recursive: true });
+  // Wipe stale trade files from previous scans — otherwise orphans accumulate forever
+  // (old cache in this repo had 90 files for 14 rows).
+  if (fs.existsSync(TRADES_DIR)) fs.rmSync(TRADES_DIR, { recursive: true, force: true });
+  fs.mkdirSync(TRADES_DIR, { recursive: true });
   const allTrades: any[] = []; // aggregate of every trade (for Period P&L Summary)
   const stripTrades = (rows: any[], mod: string) =>
     rows.map((r) => {

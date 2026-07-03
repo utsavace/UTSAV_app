@@ -47,11 +47,20 @@ function validateCache(): { valid: boolean; reason?: string } {
   const g = meta.gate;
   if (!g) return { valid: false, reason: "no gate in meta" };
 
-  const minT = g.minOosTrades ?? 0;
   const minWR = (g.minWinRate ?? 0) * 100;
-  const minPF = g.minProfitFactor ?? 0;
+  // Base gate = what module 2 rows satisfy; strict gate = modules 1 & 3.
+  // Validating everything against ONE gate previously self-invalidated fresh caches
+  // whenever an M2 row sat between the base and strict thresholds.
+  const baseT = g.minOosTrades ?? 0;
+  const basePF = g.minProfitFactor ?? 0;
+  const strictT = g.strict?.minOosTrades ?? baseT;
+  const strictPF = g.strict?.minProfitFactor ?? basePF;
 
   for (const n of ["1", "2", "3"]) {
+    const isStrictModule = n !== "2";
+    const minT = isStrictModule ? strictT : baseT;
+    const minPF = isStrictModule ? strictPF : basePF;
+
     const rows = readCache(`module${n}.json`);
     if (rows === null) return { valid: false, reason: `module${n} missing` };
     for (const r of rows) {
