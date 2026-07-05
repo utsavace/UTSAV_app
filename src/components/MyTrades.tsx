@@ -134,7 +134,9 @@ export function MyTrades({ onCountChange, mode = "live", asOfDate }: { onCountCh
   };
 
   const open = trades.filter((t) => t.status === "OPEN" || (t.status as string) === "PENDING");
-  const closed = trades.filter((t) => t.status !== "OPEN").sort((a, b) => (b.exitDate || "").localeCompare(a.exitDate || ""));
+  // FIX: PENDING ko closed list se exclude karo — pehle ye dono tables mein dikhta tha
+  // aur closed table uske null returnPct pe crash karti thi (black screen).
+  const closed = trades.filter((t) => t.status !== "OPEN" && (t.status as string) !== "PENDING").sort((a, b) => (b.exitDate || "").localeCompare(a.exitDate || ""));
 
   // ---------- Stats-based learning insights (client-side, no AI needed) ----------
   const stats = useMemo(() => {
@@ -169,7 +171,9 @@ export function MyTrades({ onCountChange, mode = "live", asOfDate }: { onCountCh
     return { winRate, wins: wins.length, losses: losses.length, avgWin, avgLoss, expectancy, byStrat, avgHold: Math.round(closed.reduce((s, t) => s + holdDays(t), 0) / closed.length), insights };
   }, [closed]);
 
-  const fmtPct = (v?: number) => (v === undefined ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`);
+  // FIX: null-safe formatter — server PENDING trades ke liye null bhejta hai (undefined nahi);
+  // pehle null.toFixed(2) crash karta tha → black screen. Ab null/NaN sab pe "—".
+  const fmtPct = (v?: number | null) => (v === undefined || v === null || !isFinite(v) ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`);
 
   if (loading) return <div className="state"><div className="spinner" />Journal load ho raha hai…</div>;
 
@@ -210,7 +214,7 @@ export function MyTrades({ onCountChange, mode = "live", asOfDate }: { onCountCh
 
       {open.length > 0 && (
         <div style={box}>
-          <h4 style={{ margin: "0 0 8px", color: "#fbbf24" }}> An open trade here </h4>
+          <h4 style={{ margin: "0 0 8px", color: "#fbbf24" }}>🟡 {isPb ? "Open Practice Trades" : "Open Trades"} ({open.length})</h4>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
@@ -287,7 +291,8 @@ export function MyTrades({ onCountChange, mode = "live", asOfDate }: { onCountCh
               </tr></thead>
               <tbody>
                 {closed.map((t) => {
-                  const m = STATUS_META[t.status];
+                  {/* FIX: unknown status kabhi black-screen na kare — safe fallback badge */}
+                  const m = STATUS_META[t.status] || { label: String(t.status), color: "#8e9ba9", bg: "rgba(142,155,169,0.12)" };
                   return (
                     <React.Fragment key={t.id}>
                       <tr>
