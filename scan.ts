@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-interface OHLCV {
+export interface OHLCV {
   date: string; // YYYY-MM-DD
   open: number;
   high: number;
@@ -10,7 +10,57 @@ interface OHLCV {
   volume: number;
 }
 
-interface TradeRecord {
+// ---------------- PERSONAL TRADE JOURNAL ----------------
+
+export interface JournalTrade {
+  id: string;
+  symbol: string;
+  name?: string;
+  strategyId?: string;
+  strategyLabel?: string;
+  module?: string;           // "m1" | "m2" | "m3"
+  takenAt: string;           // ISO timestamp when the user ticked "taking this trade"
+  entryDate: string;         // YYYY-MM-DD trading day of entry
+  entryPrice: number;
+  stopPrice: number;
+  targetPrice: number;
+  status: "OPEN" | "SL_HIT" | "TARGET_HIT" | "CLOSED_MANUAL";
+  exitPrice?: number;
+  exitDate?: string;
+  returnPct?: number;
+  currentPrice?: number;     // latest close while OPEN
+  unrealizedPct?: number;    // while OPEN
+  depthPct?: number;         // m2: cup depth at entry (for the learning stats)
+  durationM?: number;        // m2: base duration
+  note?: string;
+  aiReview?: string;         // Gemini-generated review after close
+}
+
+// Walks the candles AFTER the entry day chronologically and decides whether the
+// stop-loss or the target was hit first (gap-aware). Same-candle ambiguity (low
+// touches stop AND high touches target on one day) resolves to SL — conservative,
+// since intraday order is unknowable from daily bars.
+// Checks start from the NEXT session (date > entryDate) because the entry itself
+// happened intraday on entryDate — that day's earlier low must not fake an SL hit.
+export function evaluateTradeOutcome(
+  entryDate: string,
+  entryPrice: number,
+  stopPrice: number,
+  targetPrice: number,
+  ohlcv: OHLCV[]
+): { status: "OPEN" | "SL_HIT" | "TARGET_HIT"; exitPrice?: number; exitDate?: string; currentPrice?: number } {
+  const after = ohlcv.filter((c) => c.date > entryDate);
+  for (const c of after) {
+    if (c.open <= stopPrice) return { status: "SL_HIT", exitPrice: c.open, exitDate: c.date };       // gap below stop → filled at open
+    if (c.low <= stopPrice) return { status: "SL_HIT", exitPrice: stopPrice, exitDate: c.date };     // stop hit intraday
+    if (c.open >= targetPrice) return { status: "TARGET_HIT", exitPrice: c.open, exitDate: c.date }; // gap above target
+    if (c.high >= targetPrice) return { status: "TARGET_HIT", exitPrice: targetPrice, exitDate: c.date };
+  }
+  const last = ohlcv[ohlcv.length - 1];
+  return { status: "OPEN", currentPrice: last ? last.close : undefined };
+}
+
+export interface TradeRecord {
   entryDate: string;
   exitDate: string;
   entryPrice: number;
@@ -19,6 +69,7 @@ interface TradeRecord {
   win: boolean;
   depthPct?: number;    // m2 only: depth of the cup base active at entry
   durationM?: number;   // m2 only: base duration (≈months) active at entry
+  forced?: boolean;     // closed only because the data ended (not a real strategy exit)
 }
 
 interface MACDResult {
@@ -39,7 +90,7 @@ interface StochRSIResult {
   d: number[];
 }
 
-interface BacktestStats {
+export interface BacktestStats {
   passed: boolean;
   numTrades: number;
   winRatePct: number;
@@ -52,6 +103,9 @@ interface BacktestStats {
   liveSignal: boolean;
   livePrice: number | null;
   tradeLog: TradeRecord[];
+  // Every fresh trigger with the close price of that day (m2 also carries cup depth/duration).
+  // This is what lets the Playback engine know exactly what was LIVE on any past date.
+  signals: { d: string; p: number; dp?: number; dm?: number }[];
 }
 
 // Robust fallback list of Nifty 100 constituent tickers (with .NS Yahoo Finance suffix)
@@ -142,19 +196,19 @@ const TICKERS_FALLBACK = [
 ];
 
 // ---------------- EDGE GATE CONFIG ----------------
-const MIN_TRADES = 10;          // 3 was noise; 10 = meetable+meaningful on 5y data
-const MIN_WIN_RATE = 60;        // percent
-const MIN_PROFIT_FACTOR = 2.0;
-const STRICT_TRADES = 15;       // strict gate for strategy modules (M1, M3) + M2 "Strict" highlight
-const STRICT_PF = 2.5;
+export const MIN_TRADES = 10;          // 3 was noise; 10 = meetable+meaningful on 5y data
+export const MIN_WIN_RATE = 60;        // percent
+export const MIN_PROFIT_FACTOR = 2.0;
+export const STRICT_TRADES = 15;       // strict gate for strategy modules (M1, M3) + M2 "Strict" highlight
+export const STRICT_PF = 2.5;
 export const NO_LOSS_PF_CAP = 10.0;    // cap so 3-trade no-loss runs don't show PF 267
 const YAHOO_RANGE = "max";      // full available history so any past date can be selected
 const SYNTHETIC_DAYS = 5000;    // ~20y of trading days for the fallback path
-const COST_PCT = 0.2;           // round-trip cost + slippage per trade (%) subtracted from every return
+export const COST_PCT = 0.2;           // round-trip cost + slippage per trade (%) subtracted from every return
 const FETCH_RETRIES = 3;        // Yahoo retry attempts with backoff (rate-limit resilience)
-const CUP_WINDOWS = [252, 189, 126]; // rounding-bottom base windows ≈ 12 / 9 / 6 months (longest preferred)
+export const CUP_WINDOWS = [252, 189, 126]; // rounding-bottom base windows ≈ 12 / 9 / 6 months (longest preferred)
 
-const STRATEGIES_POOL = [
+export const STRATEGIES_POOL = [
   { id: "m1_rsi_macd", label: "RSI(14) + MACD Cross", entry: "RSI < 40 and MACD histogram turns positive in oversold zone", exit: "RSI > 70 or MACD histogram < 0" },
   { id: "m1_ema_pullback", label: "EMA 50 Pullback + Volume", entry: "Price touches 50 EMA with volume > 1.5x average", exit: "EMA 20 crossover" },
   { id: "m1_bb_squeeze", label: "Bollinger Bands Squeeze Breakout", entry: "BB Bandwidth < 0.05 followed by daily close above Upper Band", exit: "Close below middle Band" },
@@ -383,7 +437,7 @@ function calculateADX(historicalData: OHLCV[], period: number = 14): number[] {
 // Scans multiple base windows (≈12/9/6 months) at bar i. Returns the matched cup
 // (longest window preferred) or null. Used both for entries and for row metadata,
 // so per-trade depth/duration in the research buckets is REAL, not hard-coded.
-function detectCup(closes: number[], i: number): { depth: number; months: number; pivot: number } | null {
+export function detectCup(closes: number[], i: number): { depth: number; months: number; pivot: number } | null {
   for (const w of CUP_WINDOWS) {
     if (i < w) continue;
     const slice = closes.slice(i - w, i + 1);
@@ -432,8 +486,10 @@ function backtestStrategy(
   // No-look-ahead execution: a signal on bar i is EXECUTED at bar i+1's open.
   let pendingEntry = false;
   let pendingCup: { depth: number; months: number } | null = null; // m2 cup matched at signal time
+  let pendingCupCandidate: { depth: number; months: number } | null = null; // this bar's matched cup (before trigger accept)
   let entryCup: { depth: number; months: number } | null = null;   // m2 cup for the open position
   let signalOnLastBar = false; // fresh trigger on the latest close → actionable LIVE signal
+  const signals: { d: string; p: number; dp?: number; dm?: number }[] = []; // playback: what was LIVE on each date
 
   // 20-day SMA volume average calculation
   const avgVol20: number[] = [];
@@ -478,7 +534,7 @@ function backtestStrategy(
           const nearBreakout = price >= cup.pivot * 0.97 && price <= cup.pivot * 1.01; // pre-breakout zone: 3% below to 1% above pivot
           if (nearBreakout) {
             trigger = true;
-            pendingCup = { depth: cup.depth, months: cup.months };
+            pendingCupCandidate = { depth: cup.depth, months: cup.months };
           }
         }
       } else if (strategyId === "m3_best_overall") {
@@ -486,13 +542,20 @@ function backtestStrategy(
       }
 
       if (trigger) {
+        signals.push({
+          d: dates[i],
+          p: Math.round(price * 100) / 100,
+          ...(pendingCupCandidate ? { dp: Math.round(pendingCupCandidate.depth * 10) / 10, dm: pendingCupCandidate.months } : {})
+        });
         if (i === ohlcv.length - 1) {
           // Signal formed on the LATEST close → nothing to backfill, but this IS the live setup
           signalOnLastBar = true;
         } else {
           pendingEntry = true;
+          pendingCup = pendingCupCandidate;
         }
       }
+      pendingCupCandidate = null;
     } else {
       let exit = false;
       let exitPrice = price; // default: exit at close of the exit bar
@@ -532,7 +595,8 @@ function backtestStrategy(
           exitPrice: Math.round(exitPrice * 100) / 100,
           returnPct: Math.round(returnPct * 100) / 100,
           win: returnPct > 0,
-          ...(entryCup ? { depthPct: Math.round(entryCup.depth * 10) / 10, durationM: entryCup.months } : {})
+          ...(entryCup ? { depthPct: Math.round(entryCup.depth * 10) / 10, durationM: entryCup.months } : {}),
+          ...(exit ? {} : { forced: true }) // closed by data ending, not by the strategy
         });
         lastTradeEntry = entryPrice;
         lastTradeExit = exitPrice;
@@ -555,7 +619,8 @@ function backtestStrategy(
       exitPrice: Math.round(lastP * 100) / 100,
       returnPct: Math.round(returnPct * 100) / 100,
       win: returnPct > 0,
-      ...(entryCup ? { depthPct: Math.round(entryCup.depth * 10) / 10, durationM: entryCup.months } : {})
+      ...(entryCup ? { depthPct: Math.round(entryCup.depth * 10) / 10, durationM: entryCup.months } : {}),
+      forced: true // closed by data ending, not by the strategy
     });
     lastTradeEntry = entryPrice;
     lastTradeExit = lastP;
@@ -578,7 +643,8 @@ function backtestStrategy(
       lastReturnPct: 0,
       liveSignal: signalOnLastBar,
       livePrice: signalOnLastBar ? Math.round(lastP) : null,
-      tradeLog: []
+      tradeLog: [],
+      signals
     };
   }
 
@@ -634,7 +700,8 @@ function backtestStrategy(
     lastReturnPct: parseFloat(lastReturnPct.toFixed(2)),
     liveSignal,
     livePrice: liveSignal ? Math.round(closes[closes.length - 1]) : null,
-    tradeLog
+    tradeLog,
+    signals
   };
 }
 
@@ -717,7 +784,7 @@ function parseYahooChart(jsonData: any): OHLCV[] {
 
 // ---------------- LIVE YAHOO FINANCE DATA GETTER ----------------
 
-async function fetchStockData(symbol: string): Promise<OHLCV[] | null> {
+export async function fetchStockData(symbol: string): Promise<OHLCV[] | null> {
   const period2 = Math.floor(Date.now() / 1000);
   const period1 = Math.floor(new Date("2005-01-01T00:00:00Z").getTime() / 1000);
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d`;
@@ -823,6 +890,28 @@ async function loadNifty500Tickers(log: (msg: string) => void): Promise<{ symbol
 
 // ---------------- MAIN SCAN RUNNER ----------------
 
+// One-stop analysis for a candle series: computes every indicator once and backtests the
+// whole strategy pool (+ the rounding-bottom system). Used by BOTH the live scanner and
+// the Playback engine so past-date views run the EXACT same math as live scans.
+export function computeAllStrategyStats(ohlcv: OHLCV[]): Record<string, BacktestStats> {
+  const closes = ohlcv.map(d => d.close);
+  const rsi = calculateRSI(closes, 14);
+  const ema9 = calculateEMA(closes, 9);
+  const ema21 = calculateEMA(closes, 21);
+  const ema50 = calculateEMA(closes, 50);
+  const macd = calculateMACD(closes);
+  const bb = calculateBollingerBands(closes, 20, 2);
+  const stochRsi = calculateStochasticRSI(rsi, 14, 3, 3);
+  const adx = calculateADX(ohlcv, 14);
+
+  const out: Record<string, BacktestStats> = {};
+  for (const strat of STRATEGIES_POOL) {
+    out[strat.id] = backtestStrategy(strat.id, ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx);
+  }
+  out["m2_rounding_bottom"] = backtestStrategy("m2_rounding_bottom", ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx);
+  return out;
+}
+
 export async function runScan(
   onProgress?: (progress: number, scanned: number, currentSymbol: string, passedCount: number, logLine: string) => void
 ) {
@@ -831,6 +920,18 @@ export async function runScan(
   if (!fs.existsSync(CACHE)) {
     fs.mkdirSync(CACHE, { recursive: true });
   }
+  // Raw candle store for the Playback engine. Overwritten per symbol (never wiped) so
+  // a partially-failed later scan can't destroy previously saved playback history.
+  const OHLCV_DIR = path.join(process.cwd(), "data", "ohlcv");
+  fs.mkdirSync(OHLCV_DIR, { recursive: true });
+  // Playback model files: per-stock trades + dated signals for EVERY strategy on EVERY
+  // scanned stock (pass + fail) — the time machine needs the full universe, not just
+  // today's winners. Wiped each scan so it always matches the current engine.
+  const PLAYBACK_DIR = path.join(process.cwd(), "data", "playback");
+  if (fs.existsSync(PLAYBACK_DIR)) fs.rmSync(PLAYBACK_DIR, { recursive: true, force: true });
+  fs.mkdirSync(PLAYBACK_DIR, { recursive: true });
+  let axisDates: string[] = [];      // longest REAL trading-day axis seen (drives day-stepping)
+  let axisDatesSynth: string[] = []; // fallback if the whole scan was synthetic
 
   const logs: string[] = [];
   let totalStocks = 500; // Will be set dynamically from tickers.length
@@ -892,20 +993,47 @@ export async function runScan(
           isReal = false;
         }
 
-        const closes = ohlcv.map(d => d.close);
-        const rsi = calculateRSI(closes, 14);
-        const ema9 = calculateEMA(closes, 9);
-        const ema21 = calculateEMA(closes, 21);
-        const ema50 = calculateEMA(closes, 50);
-        const macd = calculateMACD(closes);
-        const bb = calculateBollingerBands(closes, 20, 2);
-        const stochRsi = calculateStochasticRSI(rsi, 14, 3, 3);
-        const adx = calculateADX(ohlcv, 14);
+        // Rounding helper shared by BOTH playback persistence blocks below.
+        // (Previously declared inside the first try{} — the second block then threw
+        // ReferenceError and silently skipped writing every playback model file.)
+        const r2 = (x: number) => Math.round(x * 100) / 100;
 
-        const stratResults: Record<string, BacktestStats> = {};
-        for (const strat of STRATEGIES_POOL) {
-          stratResults[strat.id] = backtestStrategy(strat.id, ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx);
-        }
+        // Persist raw candles for the Playback (time machine) engine — column format keeps files small.
+        try {
+          fs.writeFileSync(path.join(OHLCV_DIR, `${stock.symbol}.json`), JSON.stringify({
+            symbol: stock.symbol,
+            name: stock.name,
+            synthetic: !isReal,
+            d: ohlcv.map(c => c.date),
+            o: ohlcv.map(c => r2(c.open)),
+            h: ohlcv.map(c => r2(c.high)),
+            l: ohlcv.map(c => r2(c.low)),
+            c: ohlcv.map(c => r2(c.close)),
+            v: ohlcv.map(c => c.volume)
+          }));
+        } catch { /* playback data is best-effort; the scan itself must not fail on disk issues */ }
+
+        const closes = ohlcv.map(d => d.close);
+        const stratResults = computeAllStrategyStats(ohlcv);
+
+        // Playback model: this stock's complete trade + signal history for ALL strategies.
+        try {
+          const strategies: Record<string, { trades: TradeRecord[]; signals: { d: string; p: number; dp?: number; dm?: number }[] }> = {};
+          for (const sid of Object.keys(stratResults)) {
+            strategies[sid] = { trades: stratResults[sid].tradeLog, signals: stratResults[sid].signals };
+          }
+          fs.writeFileSync(path.join(PLAYBACK_DIR, `${stock.symbol}.json`), JSON.stringify({
+            symbol: stock.symbol,
+            name: stock.name,
+            synthetic: !isReal,
+            d: ohlcv.map(c => c.date),          // per-stock trading days (holidays/listing gaps differ per stock)
+            c: ohlcv.map(c => r2(c.close)),      // closes → as-of force-close of open positions + livePrice, exactly like the live scan
+            strategies
+          }));
+          const dts = ohlcv.map(c => c.date);
+          if (isReal && dts.length > axisDates.length) axisDates = dts;
+          if (!isReal && dts.length > axisDatesSynth.length) axisDatesSynth = dts;
+        } catch { /* playback data is best-effort; the scan itself must not fail on disk issues */ }
 
         // Dynamic Strategy Optimization: Evaluate all 6 systems to find the absolute best fit
         let bestB1Strat = STRATEGIES_POOL[0];
@@ -928,7 +1056,7 @@ export async function runScan(
           }
         }
 
-        const b2 = backtestStrategy("m2_rounding_bottom", ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx);
+        const b2 = stratResults["m2_rounding_bottom"];
 
         return { stock, isReal, stratResults, bestB1Strat, bestB1Stats, b2, closes };
       })());
@@ -1034,6 +1162,22 @@ export async function runScan(
 
   log("📊 Compiling global technical indicators...");
   await new Promise(r => setTimeout(r, 300));
+
+  // Playback engine index: the trading-day axis (for day stepping) + stock directory.
+  try {
+    const axis = axisDates.length ? axisDates : axisDatesSynth;
+    fs.writeFileSync(path.join(PLAYBACK_DIR, "axis.json"), JSON.stringify({
+      dates: axis,
+      start: axis[0] || null,
+      end: axis[axis.length - 1] || null,
+      generatedAt: new Date().toISOString()
+    }));
+    fs.writeFileSync(path.join(PLAYBACK_DIR, "index.json"), JSON.stringify(
+      allScanned.map((res: any) => ({ symbol: res.stock.symbol, name: res.stock.name, synthetic: !res.isReal }))
+    ));
+    log(`🕰 Playback engine data saved: ${allScanned.length} stocks, ${axis.length} trading days`);
+  } catch { /* best-effort */ }
+
   log("💾 Saving backtest evaluation cache layers...");
 
   const nowString = new Date().toISOString();
@@ -1230,7 +1374,7 @@ export async function runScan(
   fs.writeFileSync(path.join(CACHE, "module3.json"), JSON.stringify(stripTrades(module3Rows, "m3"), null, 2));
   fs.writeFileSync(path.join(CACHE, "alltrades.json"), JSON.stringify(allTrades));
 
-  log(`✅ Scan complete! Processed ${totalStocks} stocks (${realDataCount} real, ${syntheticCount} synthetic)`);
+  log(`` + "✅" + ` Scan complete! Processed ${totalStocks} stocks (${realDataCount} real, ${syntheticCount} synthetic)`);
 }
 
 // Direct execution harness
