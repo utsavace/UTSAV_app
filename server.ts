@@ -722,4 +722,94 @@ async function start() {
   app.listen(PORT, "0.0.0.0", () => console.log(`Edge console → http://localhost:${PORT}`));
 }
 
+// ============================================================================
+// /api/compare — "signal-close (3:25) entry" vs "next-open entry" comparison.
+// Browser mein kholo: /api/compare  (pehle ek scan chala hua hona chahiye)
+// ============================================================================
+app.get("/api/compare", (_req, res) => {
+  try {
+    const OHLCV_DIR2 = path.join(process.cwd(), "data", "ohlcv");
+    const PB_DIR2 = path.join(process.cwd(), "data", "playback");
+    if (!fs.existsSync(OHLCV_DIR2) || !fs.existsSync(PB_DIR2)) {
+      res.type("text/plain").send("❌ Playback data nahi mila. Pehle app mein 'Fetch Fresh Data' scan chalao (server restart ke baad data dobara banana padta hai), phir ye page refresh karo.");
+      return;
+    }
+    const COST2 = 0.2;
+    const pfC = (rets: number[]) => { let gw = 0, gl = 0; for (const r of rets) r > 0 ? (gw += r) : (gl += -r); return gl === 0 ? (rets.length ? 10 : 0) : Math.min(10, gw / gl); };
+    const aggC = (rets: number[]) => ({ n: rets.length, win: rets.length ? (100 * rets.filter((r) => r > 0).length) / rets.length : 0, avg: rets.length ? rets.reduce((a, b) => a + b, 0) / rets.length : 0, pf: pfC(rets) });
+    const byStrat: Record<string, { close: number[]; nextOpen: number[]; gaps: number[] }> = {};
+    let stocksUsed = 0, tradesUsed = 0, skippedSyn = 0, minD = "9999", maxD = "0000";
+
+    for (const f of fs.readdirSync(PB_DIR2)) {
+      if (!f.endsWith(".json") || f === "axis.json" || f === "index.json") continue;
+      const st = JSON.parse(fs.readFileSync(path.join(PB_DIR2, f), "utf8"));
+      if (st.isSynthetic) { skippedSyn++; continue; }
+      const rp = path.join(OHLCV_DIR2, `${st.symbol}.json`);
+      if (!fs.existsSync(rp)) continue;
+      const raw = JSON.parse(fs.readFileSync(rp, "utf8"));
+      const idx: Record<string, number> = {};
+      raw.d.forEach((d: string, i: number) => (idx[d] = i));
+      let used = false;
+      for (const sid of Object.keys(st.strategies || {})) {
+        for (const t of st.strategies[sid].trades || []) {
+          if (t.forced) continue;
+          const ei = idx[t.entryDate];
+          if (ei === undefined || ei < 1) continue;
+          const sc = raw.c[ei - 1], no = raw.o[ei];
+          if (!sc || !no || Math.abs(no - t.entryPrice) / t.entryPrice > 0.005) continue;
+          let rNO: number | null, rCL: number | null;
+          if (sid === "m2_rounding_bottom") {
+            const sim = (entry: number, sb: number): number | null => {
+              const stop = entry * 0.95, tgt = entry * 1.15;
+              for (let i = sb; i < raw.d.length; i++) {
+                if (raw.o[i] <= stop) return ((raw.o[i] - entry) / entry) * 100 - COST2;
+                if (raw.l[i] <= stop) return ((stop - entry) / entry) * 100 - COST2;
+                if (raw.o[i] >= tgt) return ((raw.o[i] - entry) / entry) * 100 - COST2;
+                if (raw.h[i] >= tgt) return ((tgt - entry) / entry) * 100 - COST2;
+              }
+              return null;
+            };
+            rNO = sim(no, ei + 1); rCL = sim(sc, ei);
+            if (rNO === null || rCL === null) continue;
+          } else {
+            rNO = t.returnPct;
+            rCL = ((t.exitPrice - sc) / sc) * 100 - COST2;
+          }
+          const b = (byStrat[sid] = byStrat[sid] || { close: [], nextOpen: [], gaps: [] });
+          b.nextOpen.push(rNO!); b.close.push(rCL!); b.gaps.push(((no - sc) / sc) * 100);
+          tradesUsed++; used = true;
+          if (t.entryDate < minD) minD = t.entryDate;
+          if (t.entryDate > maxD) maxD = t.entryDate;
+        }
+      }
+      if (used) stocksUsed++;
+    }
+
+    if (!tradesUsed) { res.type("text/plain").send("❌ Real-data trades nahi mile (synthetic skip hote hain). Fresh scan chala ke dobara try karo."); return; }
+    const fmtN = (x: number, w = 7, d = 2) => x.toFixed(d).padStart(w);
+    const L: string[] = [];
+    L.push("ENTRY STYLE COMPARISON — real scan data");
+    L.push(`${stocksUsed} stocks | ${tradesUsed} trades | ${minD} -> ${maxD} | costs ${COST2}%/trade${skippedSyn ? ` | ${skippedSyn} synthetic skipped` : ""}`);
+    L.push("=".repeat(100));
+    L.push("STRATEGY".padEnd(24) + "N".padStart(6) + " | CLOSE(3:25): win%   avg%     PF | NEXT-OPEN:  win%   avg%     PF | avgGAP%  gapUp%");
+    L.push("-".repeat(100));
+    const aC: number[] = [], aO: number[] = [], aG: number[] = [];
+    for (const sid of Object.keys(byStrat).sort()) {
+      const b = byStrat[sid], c = aggC(b.close), o = aggC(b.nextOpen);
+      const g = b.gaps.reduce((a, x) => a + x, 0) / b.gaps.length;
+      const gu = (100 * b.gaps.filter((x) => x > 0).length) / b.gaps.length;
+      L.push(sid.padEnd(24) + String(c.n).padStart(6) + " |            " + fmtN(c.win, 6, 1) + fmtN(c.avg) + fmtN(c.pf) + " |           " + fmtN(o.win, 6, 1) + fmtN(o.avg) + fmtN(o.pf) + " |" + fmtN(g, 8, 3) + fmtN(gu, 8, 1));
+      aC.push(...b.close); aO.push(...b.nextOpen); aG.push(...b.gaps);
+    }
+    L.push("-".repeat(100));
+    const tc = aggC(aC), to = aggC(aO);
+    L.push("OVERALL".padEnd(24) + String(tc.n).padStart(6) + " |            " + fmtN(tc.win, 6, 1) + fmtN(tc.avg) + fmtN(tc.pf) + " |           " + fmtN(to.win, 6, 1) + fmtN(to.avg) + fmtN(to.pf) + " |" + fmtN(aG.reduce((a, x) => a + x, 0) / aG.length, 8, 3) + fmtN((100 * aG.filter((x) => x > 0).length) / aG.length, 8, 1));
+    L.push("=".repeat(100));
+    L.push("CLOSE(3:25) = signal-day close entry | NEXT-OPEN = engine default | m2 dono full re-simulated, indicator exits identical");
+    res.type("text/plain").send(L.join("\n"));
+  } catch (e: any) {
+    res.type("text/plain").send("❌ Compare error: " + (e?.message || e));
+  }
+});
+
 start();
