@@ -102,10 +102,13 @@ export interface BacktestStats {
   lastReturnPct: number;
   liveSignal: boolean;
   livePrice: number | null;
+  liveStop?: number | null;    // m4: structure-based SL for today's live signal
+  liveTarget?: number | null;  // m4: 2R target for today's live signal
   tradeLog: TradeRecord[];
-  // Every fresh trigger with the close price of that day (m2 also carries cup depth/duration).
+  // Every fresh trigger with the close price of that day (m2 also carries cup depth/duration;
+  // m4 carries its structure-based stop/tgt so playback take-trade can use real levels).
   // This is what lets the Playback engine know exactly what was LIVE on any past date.
-  signals: { d: string; p: number; dp?: number; dm?: number }[];
+  signals: { d: string; p: number; dp?: number; dm?: number; stop?: number; tgt?: number }[];
 }
 
 // Robust fallback list of Nifty 100 constituent tickers (with .NS Yahoo Finance suffix)
@@ -242,7 +245,7 @@ class SeededRandom {
 
 // ---------------- INDICATOR MATH FUNCTIONS ----------------
 
-function calculateRSI(closes: number[], period: number = 14): number[] {
+export function calculateRSI(closes: number[], period: number = 14): number[] {
   if (closes.length === 0) return [];
   const rsi: number[] = Array(closes.length).fill(50);
   if (closes.length <= period) return rsi;
@@ -893,6 +896,220 @@ async function loadNifty500Tickers(log: (msg: string) => void): Promise<{ symbol
 // One-stop analysis for a candle series: computes every indicator once and backtests the
 // whole strategy pool (+ the rounding-bottom system). Used by BOTH the live scanner and
 // the Playback engine so past-date views run the EXACT same math as live scans.
+// ============================================================================
+// RSI DIVERGENCE ENGINE (Module 4)
+// Pivot-fractal based classical divergence:
+//   BULLISH: price LOWER LOW  + RSI HIGHER LOW  (first pivot RSI < 40)
+//   BEARISH: price HIGHER HIGH + RSI LOWER HIGH (first pivot RSI > 60)
+// NO LOOK-AHEAD: a pivot needs PIVOT_K bars on its RIGHT side to exist, so the
+// signal only "confirms" PIVOT_K bars after the actual pivot — trades use the
+// confirm bar, never the pivot bar itself.
+// ============================================================================
+export const PIVOT_K = 3;        // pivot = extreme among ±3 bars
+const DIV_MIN_GAP = 5;           // pivots kam se kam 5 sessions door
+const DIV_MAX_GAP = 60;          // aur zyada se zyada ~3 mahine
+const DIV_RSI_DELTA = 2;         // RSI mein kam se kam 2-point ka clear fark
+const DIV_MAX_RISK_PCT = 8;      // structure-SL entry se 8%+ door ho toh trade skip (quality filter)
+const DIV_RR = 2;                // target = entry + 2 × risk (2R)
+
+export interface DivergenceEvent {
+  type: "bullish" | "bearish";
+  p1: { i: number; d: string; price: number; rsi: number };
+  p2: { i: number; d: string; price: number; rsi: number };
+  confirmIdx: number;
+  confirmDate: string;
+}
+
+export function detectDivergences(dates: string[], highs: number[], lows: number[], rsi: number[]): DivergenceEvent[] {
+  const events: DivergenceEvent[] = [];
+  const pivLows: number[] = [];
+  const pivHighs: number[] = [];
+  for (let i = PIVOT_K; i < lows.length - PIVOT_K; i++) {
+    let isL = true, isH = true;
+    for (let k = 1; k <= PIVOT_K; k++) {
+      if (lows[i] > lows[i - k] || lows[i] > lows[i + k]) isL = false;
+      if (highs[i] < highs[i - k] || highs[i] < highs[i + k]) isH = false;
+      if (!isL && !isH) break;
+    }
+    if (isL) {
+      for (let j = pivLows.length - 1; j >= 0; j--) {
+        const a = pivLows[j];
+        const gap = i - a;
+        if (gap < DIV_MIN_GAP) continue;
+        if (gap > DIV_MAX_GAP) break;
+        if (lows[i] < lows[a] && (rsi[i] || 50) > (rsi[a] || 50) + DIV_RSI_DELTA && (rsi[a] || 50) < 40) {
+          events.push({
+            type: "bullish",
+            p1: { i: a, d: dates[a], price: lows[a], rsi: Math.round((rsi[a] || 50) * 10) / 10 },
+            p2: { i, d: dates[i], price: lows[i], rsi: Math.round((rsi[i] || 50) * 10) / 10 },
+            confirmIdx: i + PIVOT_K,
+            confirmDate: dates[i + PIVOT_K]
+          });
+          break; // nearest valid pair — ek event per pivot kaafi
+        }
+      }
+      pivLows.push(i);
+    }
+    if (isH) {
+      for (let j = pivHighs.length - 1; j >= 0; j--) {
+        const a = pivHighs[j];
+        const gap = i - a;
+        if (gap < DIV_MIN_GAP) continue;
+        if (gap > DIV_MAX_GAP) break;
+        if (highs[i] > highs[a] && (rsi[i] || 50) < (rsi[a] || 50) - DIV_RSI_DELTA && (rsi[a] || 50) > 60) {
+          events.push({
+            type: "bearish",
+            p1: { i: a, d: dates[a], price: highs[a], rsi: Math.round((rsi[a] || 50) * 10) / 10 },
+            p2: { i, d: dates[i], price: highs[i], rsi: Math.round((rsi[i] || 50) * 10) / 10 },
+            confirmIdx: i + PIVOT_K,
+            confirmDate: dates[i + PIVOT_K]
+          });
+          break;
+        }
+      }
+      pivHighs.push(i);
+    }
+  }
+  return events;
+}
+
+// Dedicated backtest: entry NEXT OPEN after bullish confirm; SL = 1% below the
+// divergence low (structure), target = entry + 2R; exits gap-aware intraday;
+// bearish-divergence confirm while long = protective exit at close.
+export function backtestDivergence(ohlcv: OHLCV[], rsi: number[]): BacktestStats {
+  const dates = ohlcv.map(d => d.date);
+  const opens = ohlcv.map(d => d.open);
+  const highs = ohlcv.map(d => d.high);
+  const lows = ohlcv.map(d => d.low);
+  const closes = ohlcv.map(d => d.close);
+  const events = detectDivergences(dates, highs, lows, rsi);
+
+  const bullAt: Record<number, DivergenceEvent> = {};
+  const bearAt: Record<number, boolean> = {};
+  for (const e of events) {
+    if (e.type === "bullish") bullAt[e.confirmIdx] = e;
+    else bearAt[e.confirmIdx] = true;
+  }
+
+  const trades: number[] = [];
+  const tradeLog: TradeRecord[] = [];
+  const signals: BacktestStats["signals"] = [];
+  let inPosition = false, entryPrice = 0, entryDate = "";
+  let stopP = 0, tgtP = 0;
+  let pendingEntry = false, pendingStop = 0, pendingTgt = 0;
+  let signalOnLastBar = false;
+  let liveStop: number | null = null, liveTarget: number | null = null;
+  let lastTradeEntry: number | null = null, lastTradeExit: number | null = null, lastTradeReturn: number | null = null;
+
+  const closeTrade = (i: number, exitPrice: number, forced: boolean) => {
+    const returnPct = ((exitPrice - entryPrice) / entryPrice) * 100 - COST_PCT;
+    trades.push(returnPct);
+    tradeLog.push({
+      entryDate, exitDate: dates[i],
+      entryPrice: Math.round(entryPrice * 100) / 100,
+      exitPrice: Math.round(exitPrice * 100) / 100,
+      returnPct: Math.round(returnPct * 100) / 100,
+      win: returnPct > 0,
+      ...(forced ? { forced: true } : {})
+    });
+    lastTradeEntry = entryPrice; lastTradeExit = exitPrice; lastTradeReturn = returnPct;
+    inPosition = false;
+  };
+
+  for (let i = 50; i < ohlcv.length; i++) {
+    if (!inPosition) {
+      if (pendingEntry) {
+        inPosition = true;
+        entryPrice = opens[i];
+        entryDate = dates[i];
+        // Levels signal ke structure se bane the (pivot low pe), entry-price pe 2R recompute:
+        stopP = pendingStop;
+        const risk = entryPrice - stopP;
+        tgtP = risk > 0 ? entryPrice + DIV_RR * risk : pendingTgt;
+        pendingEntry = false;
+        continue;
+      }
+      const ev = bullAt[i];
+      if (ev) {
+        const price = closes[i];
+        const stop = ev.p2.price * 0.99; // divergence low se 1% neeche
+        const riskPct = ((price - stop) / price) * 100;
+        if (riskPct > 0.2 && riskPct <= DIV_MAX_RISK_PCT) { // quality filter: too-tight ya too-wide dono skip
+          const tgt = price + DIV_RR * (price - stop);
+          signals.push({ d: dates[i], p: Math.round(price * 100) / 100, stop: Math.round(stop * 100) / 100, tgt: Math.round(tgt * 100) / 100 });
+          if (i === ohlcv.length - 1) {
+            signalOnLastBar = true;
+            liveStop = Math.round(stop * 100) / 100;
+            liveTarget = Math.round(tgt * 100) / 100;
+          } else {
+            pendingEntry = true;
+            pendingStop = stop;
+            pendingTgt = tgt;
+          }
+        }
+      }
+    } else {
+      if (opens[i] <= stopP) closeTrade(i, opens[i], false);
+      else if (lows[i] <= stopP) closeTrade(i, stopP, false);
+      else if (opens[i] >= tgtP) closeTrade(i, opens[i], false);
+      else if (highs[i] >= tgtP) closeTrade(i, tgtP, false);
+      else if (bearAt[i]) closeTrade(i, closes[i], false); // bearish divergence = warning exit
+      else if (i === ohlcv.length - 1) closeTrade(i, closes[i], true);
+    }
+  }
+  if (inPosition) closeTrade(ohlcv.length - 1, closes[closes.length - 1], true); // entry executed on last bar
+
+  // ---- stats (same math as backtestStrategy) ----
+  const lastP = closes[closes.length - 1] || 0;
+  if (trades.length === 0) {
+    return {
+      numTrades: 0, winRatePct: 0, profitFactor: 1.0, avgReturnPct: 0, maxDrawdownPct: 0, passed: false,
+      lastEntryPrice: lastP, lastExitPrice: lastP, lastReturnPct: 0,
+      liveSignal: signalOnLastBar, livePrice: signalOnLastBar ? Math.round(lastP) : null,
+      liveStop, liveTarget, tradeLog: [], signals
+    };
+  }
+  const winsArr = trades.filter(t => t > 0);
+  const winRate = winsArr.length / trades.length;
+  let grossWin = 0, grossLoss = 0;
+  for (const t of trades) t > 0 ? (grossWin += t) : (grossLoss += -t);
+  const profitFactor = grossLoss === 0 ? NO_LOSS_PF_CAP : Math.min(NO_LOSS_PF_CAP, grossWin / grossLoss);
+  const avgReturn = trades.reduce((a, b) => a + b, 0) / trades.length;
+  let equity = 100, peak = 100, maxDD = 0;
+  for (const t of trades) {
+    equity *= 1 + t / 100;
+    if (equity > peak) peak = equity;
+    const dd = ((peak - equity) / peak) * 100;
+    if (dd > maxDD) maxDD = dd;
+  }
+  let liveSignal = signalOnLastBar;
+  if (!liveSignal && tradeLog.length > 0) {
+    const lt = tradeLog[tradeLog.length - 1];
+    const ei = dates.indexOf(lt.entryDate);
+    if (ei !== -1 && dates.length - 1 - ei <= 5 && lt.exitDate === dates[dates.length - 1] && lt.forced) {
+      liveSignal = true;
+      liveStop = Math.round(stopP * 100) / 100;
+      liveTarget = Math.round(tgtP * 100) / 100;
+    }
+  }
+  return {
+    numTrades: trades.length,
+    winRatePct: Math.round(winRate * 1000) / 10,
+    profitFactor: Math.round(profitFactor * 100) / 100,
+    avgReturnPct: Math.round(avgReturn * 100) / 100,
+    maxDrawdownPct: Math.round(maxDD * 10) / 10,
+    passed: winRate >= MIN_WIN_RATE / 100 && profitFactor >= MIN_PROFIT_FACTOR && trades.length >= MIN_TRADES,
+    lastEntryPrice: lastTradeEntry ?? lastP,
+    lastExitPrice: lastTradeExit ?? lastP,
+    lastReturnPct: lastTradeReturn !== null ? Math.round(lastTradeReturn * 100) / 100 : 0,
+    liveSignal,
+    livePrice: liveSignal ? Math.round(lastP) : null,
+    liveStop: liveSignal ? liveStop : null,
+    liveTarget: liveSignal ? liveTarget : null,
+    tradeLog, signals
+  };
+}
+
 export function computeAllStrategyStats(ohlcv: OHLCV[]): Record<string, BacktestStats> {
   const closes = ohlcv.map(d => d.close);
   const rsi = calculateRSI(closes, 14);
@@ -909,6 +1126,7 @@ export function computeAllStrategyStats(ohlcv: OHLCV[]): Record<string, Backtest
     out[strat.id] = backtestStrategy(strat.id, ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx);
   }
   out["m2_rounding_bottom"] = backtestStrategy("m2_rounding_bottom", ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx);
+  out["m4_divergence"] = backtestDivergence(ohlcv, rsi);
   return out;
 }
 
@@ -960,6 +1178,7 @@ export async function runScan(
 
   const module1Rows: any[] = [];
   const module2Rows: any[] = [];
+  const module4Rows: any[] = [];
   const module3Rows: any[] = [];
   const allScanned: any[] = [];
 
@@ -1018,7 +1237,7 @@ export async function runScan(
 
         // Playback model: this stock's complete trade + signal history for ALL strategies.
         try {
-          const strategies: Record<string, { trades: TradeRecord[]; signals: { d: string; p: number; dp?: number; dm?: number }[] }> = {};
+          const strategies: Record<string, { trades: TradeRecord[]; signals: BacktestStats["signals"] }> = {};
           for (const sid of Object.keys(stratResults)) {
             strategies[sid] = { trades: stratResults[sid].tradeLog, signals: stratResults[sid].signals };
           }
@@ -1154,6 +1373,36 @@ export async function runScan(
         });
         log(`🎯 [ROUNDING BOTTOM] Base pattern confirmed for ${stock.symbol} (${actualDurationMonths}m base, depth: ${cupDepth.toFixed(1)}%)`);
       }
+
+      // MODULE 4: RSI Divergence (base gate, same standard as M2)
+      const b4 = stratResults["m4_divergence"];
+      if (b4 && b4.passed) {
+        passedCount++;
+        module4Rows.push({
+          symbol: stock.symbol,
+          name: stock.name,
+          strategyId: "m4_divergence",
+          trades: b4.tradeLog,
+          strategyLabel: "RSI Divergence",
+          entryCond: "Bullish RSI divergence (price lower-low, RSI higher-low from oversold), entry next open after pivot confirms",
+          exitCond: "SL 1% below divergence low, target 2R, ya bearish divergence confirm hone pe exit",
+          lastEntryPrice: b4.lastEntryPrice,
+          lastExitPrice: b4.lastExitPrice,
+          lastReturnPct: b4.lastReturnPct,
+          winRatePct: b4.winRatePct,
+          profitFactor: b4.profitFactor,
+          numTrades: b4.numTrades,
+          avgReturnPct: b4.avgReturnPct,
+          maxDrawdownPct: b4.maxDrawdownPct,
+          liveSignal: b4.liveSignal,
+          livePrice: b4.livePrice,
+          liveStop: b4.liveStop ?? null,
+          liveTarget: b4.liveTarget ?? null,
+          hasChart: true,
+          isSynthetic: !isReal
+        });
+        log(`📐 [DIVERGENCE] RSI divergence edge confirmed for ${stock.symbol} (${b4.numTrades} trades, PF ${b4.profitFactor})`);
+      }
     }
 
     // Small visual pause for UI terminal output pacing
@@ -1191,26 +1440,41 @@ export async function runScan(
     const mid = Math.floor(s.length / 2);
     return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
   };
+  const pnl = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
 
-  const breadthStats = STRATEGIES_POOL.map(s => {
-    const passers = allScanned.filter(res => res.stratResults[s.id]?.passed);
-    const passingPfs = passers
-      .map(res => res.stratResults[s.id].profitFactor)
-      .filter((pf: number) => isFinite(pf) && pf > 0);
-    return { id: s.id, label: s.label, gatePasses: passers.length, medianPF: median(passingPfs) };
-  });
-
-  let bestBreadth = breadthStats[0];
-  for (const b of breadthStats) {
-    if (b.gatePasses > bestBreadth.gatePasses ||
-        (b.gatePasses === bestBreadth.gatePasses && b.medianPF > bestBreadth.medianPF)) {
-      bestBreadth = b;
+  // Find breadth winner
+  const strategyCounts: Record<string, { passes: number; pfValues: number[] }> = {};
+  for (const s of STRATEGIES_POOL) {
+    strategyCounts[s.id] = { passes: 0, pfValues: [] };
+  }
+  for (const res of allScanned) {
+    for (const sid of Object.keys(res.stratResults)) {
+      if (sid === "m2_rounding_bottom" || sid === "m4_divergence" || sid === "m3_best_overall") continue;
+      const stat = res.stratResults[sid];
+      if (stat.passed) {
+        strategyCounts[sid].passes++;
+        strategyCounts[sid].pfValues.push(stat.profitFactor);
+      }
     }
   }
-  const bestGlobalStrategyLabel = bestBreadth.label;
-  const bestGlobalStrategyId = bestBreadth.id;
 
-  const winningStratConfig = STRATEGIES_POOL.find(s => s.id === bestGlobalStrategyId)!;
+  let bestSid = STRATEGIES_POOL[0].id;
+  let maxPasses = -1;
+  let bestMedPf = -1;
+
+  for (const sid of Object.keys(strategyCounts)) {
+    const info = strategyCounts[sid];
+    const med = median(info.pfValues);
+    if (info.passes > maxPasses || (info.passes === maxPasses && med > bestMedPf)) {
+      maxPasses = info.passes;
+      bestMedPf = med;
+      bestSid = sid;
+    }
+  }
+
+  const winningStratConfig = STRATEGIES_POOL.find(s => s.id === bestSid)!;
+  const bestGlobalStrategyLabel = winningStratConfig.label;
+  const bestGlobalStrategyId = bestSid;
 
   // Dynamically populate Module 3 rows with the winner strategy results
   for (const res of allScanned) {
@@ -1293,6 +1557,19 @@ export async function runScan(
     };
   });
 
+  // Breadth chart data compiled
+  const breadthStats = STRATEGIES_POOL.map(s => {
+    const passers = allScanned.filter(res => res.stratResults[s.id]?.passed);
+    const passingPfs = passers
+      .map(res => res.stratResults[s.id].profitFactor)
+      .filter((pf: number) => isFinite(pf) && pf > 0);
+    return {
+      label: s.label,
+      gatePasses: passers.length,
+      medianPF: parseFloat(median(passingPfs).toFixed(2))
+    };
+  });
+
   // ✅ FIX #3: Honest metadata
   const metaData = {
     needsScan: false,
@@ -1300,7 +1577,7 @@ export async function runScan(
     universeCount: tickers.length, // ← ACTUAL loaded count
     scanned: scannedCount, // ← ACTUAL scanned
     withData: realDataCount + syntheticCount, // stocks that actually had price data
-    passed: module1Rows.length + module2Rows.length + module3Rows.length, // stocks that cleared the gate
+    passed: module1Rows.length + module2Rows.length + module3Rows.length + module4Rows.length, // stocks that cleared the gate
     dataQuality: {
       realData: realDataCount, // ← Track real vs synthetic
       syntheticData: syntheticCount,
@@ -1324,10 +1601,8 @@ export async function runScan(
     },
     module3: {
       chosenStrategyLabel: bestGlobalStrategyLabel,
-      gatePasses: bestBreadth.gatePasses, // same metric as the breadth chart → never contradicts it
-      breadth: breadthStats
-        .map(b => ({ label: b.label, gatePasses: b.gatePasses, medianPF: parseFloat(b.medianPF.toFixed(2)) }))
-        .sort((a, b) => b.gatePasses - a.gatePasses)
+      gatePasses: maxPasses, // same metric as the breadth chart → never contradicts it
+      breadth: breadthStats.sort((a, b) => b.gatePasses - a.gatePasses)
     },
     roundingBottomConditions: {
       totalTrades: module2Rows.reduce((sum, r) => sum + r.numTrades, 0),
@@ -1343,7 +1618,8 @@ export async function runScan(
     counts: {
       module1: module1Rows.length,
       module2: module2Rows.length,
-      module3: module3Rows.length
+      module3: module3Rows.length,
+      module4: module4Rows.length
     }
   };
 
@@ -1372,9 +1648,10 @@ export async function runScan(
   fs.writeFileSync(path.join(CACHE, "module1.json"), JSON.stringify(stripTrades(module1Rows, "m1"), null, 2));
   fs.writeFileSync(path.join(CACHE, "module2.json"), JSON.stringify(stripTrades(module2Rows, "m2"), null, 2));
   fs.writeFileSync(path.join(CACHE, "module3.json"), JSON.stringify(stripTrades(module3Rows, "m3"), null, 2));
+  fs.writeFileSync(path.join(CACHE, "module4.json"), JSON.stringify(stripTrades(module4Rows, "m4"), null, 2));
   fs.writeFileSync(path.join(CACHE, "alltrades.json"), JSON.stringify(allTrades));
 
-  log(`` + "✅" + ` Scan complete! Processed ${totalStocks} stocks (${realDataCount} real, ${syntheticCount} synthetic)`);
+  log(`✅ Scan complete! Processed ${totalStocks} stocks (${realDataCount} real, ${syntheticCount} synthetic)`);
 }
 
 // Direct execution harness

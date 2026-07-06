@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import { exec } from "child_process";
 import dotenv from "dotenv";
-import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade } from "./scan.ts";
+import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences } from "./scan.ts";
 
 // Load env for GEMINI_API_KEY (README uses .env.local; AI Studio injects at runtime)
 dotenv.config({ path: ".env.local" });
@@ -80,8 +80,8 @@ function validateCache(): { valid: boolean; reason?: string } {
   const strictT = g.strict?.minOosTrades ?? baseT;
   const strictPF = g.strict?.minProfitFactor ?? basePF;
 
-  for (const n of ["1", "2", "3"]) {
-    const isStrictModule = n !== "2";
+  for (const n of ["1", "2", "3", "4"]) {
+    const isStrictModule = n !== "2" && n !== "4"; // M2 aur M4 base gate pe chalte hain
     const minT = isStrictModule ? strictT : baseT;
     const minPF = isStrictModule ? strictPF : basePF;
 
@@ -112,7 +112,7 @@ app.get("/api/meta", (_req, res) => {
 
 app.get("/api/module/:n", (req, res) => {
   const n = req.params.n;
-  if (!["1", "2", "3"].includes(n)) return res.status(400).json({ error: "module must be 1, 2 or 3" });
+  if (!["1", "2", "3", "4"].includes(n)) return res.status(400).json({ error: "module must be 1, 2, 3 or 4" });
   if (!validateCache().valid) return res.json({ needsScan: true, stale: true, rows: [] });
   const data = readCache(`module${n}.json`);
   if (data === null) return res.json({ needsScan: true, rows: [] });
@@ -321,7 +321,7 @@ const PLAYBACK_DIR = path.join(process.cwd(), "data", "playback");
 const OHLCV_DIR = path.join(process.cwd(), "data", "ohlcv");
 const PB_TRADES_FILE = path.join(DATA_DIR, "playback_trades.json");
 
-interface PbSignal { d: string; p: number; dp?: number; dm?: number }
+interface PbSignal { d: string; p: number; dp?: number; dm?: number; stop?: number; tgt?: number }
 interface PbStrat { trades: any[]; signals: PbSignal[] }
 interface PbStock { symbol: string; name: string; synthetic: boolean; strategies: Record<string, PbStrat> }
 
@@ -445,6 +445,7 @@ app.get("/api/playback/snapshot", (req, res) => {
 
   const module1Rows: any[] = [];
   const module2Rows: any[] = [];
+  const module4Rows: any[] = [];
   const module3Rows: any[] = [];
   const breadthCount: Record<string, { passes: number; pfs: number[] }> = {};
   for (const s of STRATEGIES_POOL) breadthCount[s.id] = { passes: 0, pfs: [] };
@@ -489,6 +490,18 @@ app.get("/api/playback/snapshot", (req, res) => {
         fields: { patternDepth: dp, patternDuration: dm }
       }));
     }
+
+    // Module 4: RSI Divergence (base gate) — live signal carries structure-based stop/tgt
+    const m4 = results["m4_divergence"];
+    if (m4 && m4.passedBase && st.strategies["m4_divergence"]) {
+      const live4 = st.strategies["m4_divergence"].signals.find((sg) => sg.d === D);
+      module4Rows.push(mkRow(st, "m4_divergence", m4, live4, {
+        strategyLabel: "RSI Divergence",
+        entryCond: "Bullish RSI divergence (price lower-low, RSI higher-low from oversold), entry next open after pivot confirms",
+        exitCond: "SL 1% below divergence low, target 2R, ya bearish divergence confirm hone pe exit",
+        fields: { hasChart: true, liveStop: live4?.stop ?? null, liveTarget: live4?.tgt ?? null }
+      }));
+    }
   }
 
   // Module 3: as-of breadth winner (identical metric to the chart)
@@ -529,16 +542,17 @@ app.get("/api/playback/snapshot", (req, res) => {
     buckets: bs.map((b) => ({ range: b.range, trades: b.trades, winRatePct: b.trades ? Math.round((100 * b.wins) / b.trades) : 0 }))
   });
 
-  const liveCount = module1Rows.filter((r) => r.liveSignal).length + module2Rows.filter((r) => r.liveSignal).length + module3Rows.filter((r) => r.liveSignal).length;
+  const liveCount = module1Rows.filter((r) => r.liveSignal).length + module2Rows.filter((r) => r.liveSignal).length + module3Rows.filter((r) => r.liveSignal).length + module4Rows.filter((r) => r.liveSignal).length;
 
   res.json({
     ok: true,
     date: D,
-    counts: { module1: module1Rows.length, module2: module2Rows.length, module3: module3Rows.length },
+    counts: { module1: module1Rows.length, module2: module2Rows.length, module3: module3Rows.length, module4: module4Rows.length },
     liveCount,
     module1: module1Rows,
     module2: module2Rows,
     module3: module3Rows,
+    module4: module4Rows,
     module3Meta: { chosenStrategyLabel: winner.label, gatePasses: winner.gatePasses, breadth: breadth.map(({ id, ...rest }) => rest) },
     roundingBottomConditions: {
       totalTrades: module2Rows.reduce((s, r) => s + r.numTrades, 0),
@@ -722,6 +736,7 @@ async function start() {
   app.listen(PORT, "0.0.0.0", () => console.log(`Edge console → http://localhost:${PORT}`));
 }
 
+
 // ============================================================================
 // /api/compare — "signal-close (3:25) entry" vs "next-open entry" comparison.
 // Browser mein kholo: /api/compare  (pehle ek scan chala hua hona chahiye)
@@ -731,7 +746,7 @@ app.get("/api/compare", (_req, res) => {
     const OHLCV_DIR2 = path.join(process.cwd(), "data", "ohlcv");
     const PB_DIR2 = path.join(process.cwd(), "data", "playback");
     if (!fs.existsSync(OHLCV_DIR2) || !fs.existsSync(PB_DIR2)) {
-      res.type("text/plain").send("❌ Playback data nahi mila. Pehle app mein 'Fetch Fresh Data' scan chalao (server restart ke baad data dobara banana padta hai), phir ye page refresh karo.");
+      res.type("text/plain").send("❌ Playback data nahi mila. Pehle app mein 'Fetch Fresh Data' scan chalao (server restart ke baad data dobara banana ptda hai), phir ye page refresh karo.");
       return;
     }
     const COST2 = 0.2;
@@ -743,7 +758,7 @@ app.get("/api/compare", (_req, res) => {
     for (const f of fs.readdirSync(PB_DIR2)) {
       if (!f.endsWith(".json") || f === "axis.json" || f === "index.json") continue;
       const st = JSON.parse(fs.readFileSync(path.join(PB_DIR2, f), "utf8"));
-      if (st.isSynthetic) { skippedSyn++; continue; }
+      if (st.synthetic || st.isSynthetic) { skippedSyn++; continue; }
       const rp = path.join(OHLCV_DIR2, `${st.symbol}.json`);
       if (!fs.existsSync(rp)) continue;
       const raw = JSON.parse(fs.readFileSync(rp, "utf8"));
@@ -809,6 +824,67 @@ app.get("/api/compare", (_req, res) => {
     res.type("text/plain").send(L.join("\n"));
   } catch (e: any) {
     res.type("text/plain").send("❌ Compare error: " + (e?.message || e));
+  }
+});
+
+// ============================================================================
+// /api/divergence/chart?symbol=X&asOf=YYYY-MM-DD — chart payload for the visual
+// divergence viewer: candles + RSI + marked divergence events. asOf (playback)
+// pe data clip hota hai taaki time-machine mein future leak na ho.
+// ============================================================================
+app.get("/api/divergence/chart", (req, res) => {
+  try {
+    const symbol = String(req.query.symbol || "");
+    if (!symbol || symbol.includes("/") || symbol.includes("..")) return res.status(400).json({ ok: false, error: "valid symbol chahiye" });
+    const fp = path.join(process.cwd(), "data", "ohlcv", `${symbol}.json`);
+    if (!fs.existsSync(fp)) return res.status(404).json({ ok: false, error: "Is stock ka candle data nahi mila — fresh scan chalao." });
+    const raw = JSON.parse(fs.readFileSync(fp, "utf8"));
+
+    // asOf clip (playback ke liye)
+    const asOf = String(req.query.asOf || "");
+    let end = raw.d.length;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
+      end = raw.d.findIndex((d: string) => d > asOf);
+      if (end === -1) end = raw.d.length;
+    }
+    const ohlcv = raw.d.slice(0, end).map((d: string, i: number) => ({ date: d, open: raw.o[i], high: raw.h[i], low: raw.l[i], close: raw.c[i], volume: raw.v?.[i] ?? 0 }));
+    if (ohlcv.length < 60) return res.status(400).json({ ok: false, error: "Chart ke liye data kam hai" });
+
+    const closes = ohlcv.map((c: any) => c.close);
+    const rsi = calculateRSI(closes, 14);
+    const events = detectDivergences(ohlcv.map((c: any) => c.date), ohlcv.map((c: any) => c.high), ohlcv.map((c: any) => c.low), rsi);
+
+    // Window: last 400 bars, par kam se kam latest divergence pura dikhe
+    const N = ohlcv.length;
+    let startIdx = Math.max(0, N - 400);
+    const lastEv = events[events.length - 1];
+    if (lastEv && lastEv.p1.i < startIdx) startIdx = Math.max(0, lastEv.p1.i - 10);
+    const win = (i: number) => i - startIdx;
+
+    const evOut = events
+      .filter((e) => e.p1.i >= startIdx)
+      .slice(-12) // chart pe zyada se zyada 12 latest events (clutter na ho)
+      .map((e) => ({
+        type: e.type,
+        confirmDate: e.confirmDate,
+        p1: { x: win(e.p1.i), d: e.p1.d, price: e.p1.price, rsi: e.p1.rsi },
+        p2: { x: win(e.p2.i), d: e.p2.d, price: e.p2.price, rsi: e.p2.rsi },
+        confirmX: win(e.confirmIdx)
+      }));
+
+    res.json({
+      ok: true,
+      symbol,
+      asOf: asOf || null,
+      dates: ohlcv.slice(startIdx).map((c: any) => c.date),
+      closes: closes.slice(startIdx).map((x: number) => Math.round(x * 100) / 100),
+      highs: ohlcv.slice(startIdx).map((c: any) => Math.round(c.high * 100) / 100),
+      lows: ohlcv.slice(startIdx).map((c: any) => Math.round(c.low * 100) / 100),
+      rsi: rsi.slice(startIdx).map((x: number) => Math.round((x || 50) * 10) / 10),
+      events: evOut
+    });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
 

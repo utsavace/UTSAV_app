@@ -29,12 +29,15 @@ export interface LedgerRow {
   maxDrawdownPct: number;
   liveSignal: boolean;
   livePrice: number | null;
+  liveStop?: number | null;
+  liveTarget?: number | null;
   isSynthetic?: boolean;
   tradesKey?: string;
   trades?: TradeRecord[];                                        // playback snapshots ship trades inline
   openPosition?: { entryDate: string; entryPrice: number } | null; // playback: position open on that date
   patternDepth?: number;
   patternDuration?: number;
+  hasChart?: boolean;
 }
 
 interface LedgerProps {
@@ -47,11 +50,23 @@ interface LedgerProps {
   strictHighlight?: boolean; // M2: badge rows meeting the strict 15-trade / PF 2.5 standard
   onTradeTaken?: () => void; // notify parent so the "My Trades" tab badge updates
   playbackDate?: string | null; // set => TIME MACHINE mode: rows are an as-of-this-date snapshot
+  onOpenChart?: (symbol: string, name?: string) => void; // triggers divergence chart modal
 }
 
 const fmt = (v: number | null, d = 2) => (v === null || v === undefined ? "—" : v.toFixed(d));
 
-export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, historyStart, strictHighlight, onTradeTaken, playbackDate }: LedgerProps) {
+export function Ledger({
+  rows,
+  showStrategy,
+  sortField,
+  sortAsc,
+  onSort,
+  historyStart,
+  strictHighlight,
+  onTradeTaken,
+  playbackDate,
+  onOpenChart
+}: LedgerProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [tradesCache, setTradesCache] = useState<Record<string, TradeRecord[]>>({});
   const [loadingKey, setLoadingKey] = useState<string | null>(null);
@@ -63,6 +78,7 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
   const [tTarget, setTTarget] = useState("");
   const [takeMsg, setTakeMsg] = useState("");
   const [taking, setTaking] = useState(false);
+  
   // Playback practice-trade form uses PERCENTAGES (entry fills at next session's open)
   const [tStopPct, setTStopPct] = useState("");
   const [tTargetPct, setTTargetPct] = useState("");
@@ -110,18 +126,34 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
   const openTakeForm = (r: LedgerRow) => {
     const rowKey = r.symbol + r.strategyId;
     const isM2 = r.strategyId === "m2_rounding_bottom";
+    const isM4 = r.strategyId === "m4_divergence";
+
     if (playbackDate) {
-      setTStopPct(String(isM2 ? 5 : 8));
-      setTTargetPct(String(isM2 ? 15 : Math.max(3, Math.round(r.avgReturnPct))));
+      if (isM4 && r.livePrice && r.liveStop && r.liveTarget) {
+        // Module 4 practice trade pre-fills based on structure percent limits
+        const sPct = Math.max(0.1, ((r.livePrice - r.liveStop) / r.livePrice) * 100);
+        const tPct = Math.max(0.1, ((r.liveTarget - r.livePrice) / r.livePrice) * 100);
+        setTStopPct(sPct.toFixed(1));
+        setTTargetPct(tPct.toFixed(1));
+      } else {
+        setTStopPct(String(isM2 ? 5 : 8));
+        setTTargetPct(String(isM2 ? 15 : Math.max(3, Math.round(r.avgReturnPct))));
+      }
       setTakeMsg("");
       setTakeOpen(rowKey);
       return;
     }
-    // LIVE row → prefill from live price; otherwise user MUST type their actual entry
+
+    // LIVE row → prefill from live price
     const base = r.liveSignal && r.livePrice ? r.livePrice : 0;
     setTEntry(base ? String(base) : "");
-    setTStop(base ? String(Math.round(base * (isM2 ? 0.95 : 0.92))) : "");
-    setTTarget(base ? String(isM2 ? Math.round(base * 1.15) : Math.round(base * (1 + Math.max(r.avgReturnPct, 3) / 100))) : "");
+    if (isM4 && r.livePrice && r.liveStop && r.liveTarget) {
+      setTStop(String(Math.round(r.liveStop)));
+      setTTarget(String(Math.round(r.liveTarget)));
+    } else {
+      setTStop(base ? String(Math.round(base * (isM2 ? 0.95 : 0.92))) : "");
+      setTTarget(base ? String(isM2 ? Math.round(base * 1.15) : Math.round(base * (1 + Math.max(r.avgReturnPct, 3) / 100))) : "");
+    }
     setTakeMsg("");
     setTakeOpen(rowKey);
   };
@@ -131,8 +163,16 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
     const e = Number(entryStr);
     if (isFinite(e) && e > 0) {
       const isM2 = r.strategyId === "m2_rounding_bottom";
-      setTStop(String(Math.round(e * (isM2 ? 0.95 : 0.92))));
-      setTTarget(String(isM2 ? Math.round(e * 1.15) : Math.round(e * (1 + Math.max(r.avgReturnPct, 3) / 100))));
+      const isM4 = r.strategyId === "m4_divergence";
+      if (isM4 && r.livePrice && r.liveStop && r.liveTarget) {
+        // Adjust structural SL/target relative to actual fill entry ratio
+        const slip = e / r.livePrice;
+        setTStop(String(Math.round(r.liveStop * slip)));
+        setTTarget(String(Math.round(r.liveTarget * slip)));
+      } else {
+        setTStop(String(Math.round(e * (isM2 ? 0.95 : 0.92))));
+        setTTarget(String(isM2 ? Math.round(e * 1.15) : Math.round(e * (1 + Math.max(r.avgReturnPct, 3) / 100))));
+      }
     }
   };
 
@@ -146,10 +186,16 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          symbol: r.symbol, name: r.name, strategyId: r.strategyId, strategyLabel: r.strategyLabel,
-          module: r.strategyId?.startsWith("m2") ? "m2" : r.strategyId?.startsWith("m3") ? "m3" : "m1",
-          signalDate: playbackDate, stopPct, targetPct,
-          depthPct: r.patternDepth, durationM: r.patternDuration
+          symbol: r.symbol,
+          name: r.name,
+          strategyId: r.strategyId,
+          strategyLabel: r.strategyLabel,
+          module: r.strategyId === "m2_rounding_bottom" ? "m2" : r.strategyId === "m4_divergence" ? "m4" : r.strategyId === "m3_best_overall" ? "m3" : "m1",
+          signalDate: playbackDate,
+          stopPct,
+          targetPct,
+          depthPct: r.patternDepth,
+          durationM: r.patternDuration
         })
       });
       const d = await res.json();
@@ -176,9 +222,16 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          symbol: r.symbol, name: r.name, strategyId: r.strategyId, strategyLabel: r.strategyLabel,
-          module: r.strategyId?.startsWith("m2") ? "m2" : r.strategyId?.startsWith("m3") ? "m3" : "m1",
-          entryPrice, stopPrice, targetPrice
+          symbol: r.symbol,
+          name: r.name,
+          strategyId: r.strategyId,
+          strategyLabel: r.strategyLabel,
+          module: r.strategyId === "m2_rounding_bottom" ? "m2" : r.strategyId === "m4_divergence" ? "m4" : r.strategyId === "m3_best_overall" ? "m3" : "m1",
+          entryPrice,
+          stopPrice,
+          targetPrice,
+          depthPct: r.patternDepth,
+          durationM: r.patternDuration
         })
       });
       const d = await res.json();
@@ -200,68 +253,67 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
     const rowKey = r.symbol + r.strategyId;
     const formOpen = takeOpen === rowKey;
     if (playbackDate) {
-      // Practice mode: act ONLY on that day's fresh signal (that's the whole exercise)
       if (!r.liveSignal) return null;
       return (
-        <div style={{ marginBottom: "12px" }}>
+        <div className="mb-3">
           {!formOpen ? (
-            <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+            <div className="flex items-center gap-2 flex-wrap">
               <button
                 onClick={() => openTakeForm(r)}
-                style={{ background: "linear-gradient(90deg,#a855f7,#7c3aed)", color: "#fff", fontWeight: 800, border: "none", borderRadius: "7px", padding: "7px 14px", fontSize: "12.5px", cursor: "pointer" }}
+                className="bg-linear-to-r from-purple-500 to-indigo-600 hover:from-purple-600 hover:to-indigo-700 text-white font-extrabold border-none rounded-lg px-4 py-1.5 text-xs cursor-pointer shadow-md transition-all duration-150"
               >
                 ✋ Take this trade (practice)
               </button>
-              {takeMsg && <span style={{ fontSize: "12px", fontFamily: "monospace", color: takeMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{takeMsg}</span>}
+              {takeMsg && <span className={`text-xs font-mono ${takeMsg.startsWith("✅") ? "text-green-500" : "text-red-500"}`}>{takeMsg}</span>}
             </div>
           ) : (
-            <div style={{ padding: "10px 12px", borderRadius: "8px", background: "rgba(168,85,247,0.07)", border: "1px solid rgba(168,85,247,0.4)", fontFamily: "monospace", fontSize: "12px", color: "#c9d3df" }}>
-              <div style={{ fontWeight: 700, color: "#c084fc", marginBottom: "8px" }}>🕰 Practice trade — {r.symbol.replace(".NS", "")} @ signal {playbackDate}</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "10px", alignItems: "center" }}>
-                <label>Stop-loss % <input style={{ ...inp, borderColor: "rgba(239,68,68,0.5)", width: "64px" }} value={tStopPct} onChange={(e) => setTStopPct(e.target.value)} /></label>
-                <label>Target % <input style={{ ...inp, borderColor: "rgba(34,197,94,0.5)", width: "64px" }} value={tTargetPct} onChange={(e) => setTTargetPct(e.target.value)} /></label>
-                <button onClick={() => submitPlaybackTake(r)} disabled={taking} style={{ background: "#a855f7", color: "#fff", fontWeight: 800, border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer", fontSize: "12px", opacity: taking ? 0.6 : 1 }}>
+            <div className="p-3 rounded-lg bg-purple-500/5 border border-purple-500/40 font-mono text-xs text-slate-300">
+              <div className="font-bold text-purple-400 mb-2">🕰 Practice trade — {r.symbol.replace(".NS", "")} @ signal {playbackDate}</div>
+              <div className="flex flex-wrap gap-3 items-center">
+                <label className="flex items-center gap-1">Stop-loss % <input style={{ ...inp, borderColor: "rgba(239,68,68,0.5)", width: "64px" }} value={tStopPct} onChange={(e) => setTStopPct(e.target.value)} /></label>
+                <label className="flex items-center gap-1">Target % <input style={{ ...inp, borderColor: "rgba(34,197,94,0.5)", width: "64px" }} value={tTargetPct} onChange={(e) => setTTargetPct(e.target.value)} /></label>
+                <button onClick={() => submitPlaybackTake(r)} disabled={taking} className="bg-purple-600 hover:bg-purple-700 text-white font-extrabold border-none rounded-sm px-3 py-1 cursor-pointer text-xs disabled:opacity-60">
                   {taking ? "Saving…" : "✓ Lock decision"}
                 </button>
-                <button onClick={() => setTakeOpen(null)} style={{ background: "transparent", color: "#8e9ba9", border: "1px solid #2a3342", borderRadius: "6px", padding: "6px 12px", cursor: "pointer", fontSize: "12px" }}>Cancel</button>
+                <button onClick={() => setTakeOpen(null)} className="bg-transparent text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-600 rounded-sm px-3 py-1 cursor-pointer text-xs">Cancel</button>
               </div>
-              <div style={{ color: "#8e9ba9", fontSize: "11px", marginTop: "7px" }}>
+              <div className="text-slate-500 text-[10px] mt-1.5">
                 Entry <strong>agle trading session ke open</strong> pe fill hogi (jaise engine karta hai) — % levels abhi lock ho rahe hain, bilkul real jaise.
               </div>
-              {takeMsg && <div style={{ marginTop: "6px", color: takeMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{takeMsg}</div>}
+              {takeMsg && <div className={`mt-1.5 ${takeMsg.startsWith("✅") ? "text-green-500" : "text-red-500"}`}>{takeMsg}</div>}
             </div>
           )}
         </div>
       );
     }
     return (
-      <div style={{ marginBottom: "12px" }}>
+      <div className="mb-3">
         {!formOpen ? (
-          <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={() => openTakeForm(r)}
-              style={{ background: "linear-gradient(90deg,#fbbf24,#d97706)", color: "#080b11", fontWeight: 800, border: "none", borderRadius: "7px", padding: "7px 14px", fontSize: "12.5px", cursor: "pointer" }}
+              className="bg-linear-to-r from-amber-400 to-amber-600 hover:from-amber-500 hover:to-amber-700 text-slate-950 font-extrabold border-none rounded-lg px-4 py-1.5 text-xs cursor-pointer shadow-md transition-all duration-150"
             >
               ✋ Take this trade
             </button>
-            {takeMsg && <span style={{ fontSize: "12px", fontFamily: "monospace", color: takeMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{takeMsg}</span>}
+            {takeMsg && <span className={`text-xs font-mono ${takeMsg.startsWith("✅") ? "text-green-500" : "text-red-500"}`}>{takeMsg}</span>}
           </div>
         ) : (
-          <div style={{ padding: "10px 12px", borderRadius: "8px", background: "rgba(251,191,36,0.06)", border: "1px solid rgba(251,191,36,0.35)", fontFamily: "monospace", fontSize: "12px", color: "#c9d3df" }}>
-            <div style={{ fontWeight: 700, color: "#fbbf24", marginBottom: "8px" }}>✋ Taking {r.symbol.replace(".NS", "")} — apna actual plan confirm karo</div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "10px", alignItems: "center" }}>
-              <label>Entry ₹ <input style={inp} value={tEntry} onChange={(e) => recalcFromEntry(r, e.target.value)} placeholder="e.g. 3048" /></label>
-              <label>Stop ₹ <input style={{ ...inp, borderColor: "rgba(239,68,68,0.5)" }} value={tStop} onChange={(e) => setTStop(e.target.value)} /></label>
-              <label>Target ₹ <input style={{ ...inp, borderColor: "rgba(34,197,94,0.5)" }} value={tTarget} onChange={(e) => setTTarget(e.target.value)} /></label>
-              <button onClick={() => submitTake(r)} disabled={taking} style={{ background: "#22c55e", color: "#04110a", fontWeight: 800, border: "none", borderRadius: "6px", padding: "6px 14px", cursor: "pointer", fontSize: "12px", opacity: taking ? 0.6 : 1 }}>
+          <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/35 font-mono text-xs text-slate-300">
+            <div className="font-bold text-amber-400 mb-2">✋ Taking {r.symbol.replace(".NS", "")} — apna actual plan confirm karo</div>
+            <div className="flex flex-wrap gap-3 items-center">
+              <label className="flex items-center gap-1">Entry ₹ <input style={inp} value={tEntry} onChange={(e) => recalcFromEntry(r, e.target.value)} placeholder="e.g. 3048" /></label>
+              <label className="flex items-center gap-1">Stop ₹ <input style={{ ...inp, borderColor: "rgba(239,68,68,0.5)" }} value={tStop} onChange={(e) => setTStop(e.target.value)} /></label>
+              <label className="flex items-center gap-1">Target ₹ <input style={{ ...inp, borderColor: "rgba(34,197,94,0.5)" }} value={tTarget} onChange={(e) => setTTarget(e.target.value)} /></label>
+              <button onClick={() => submitTake(r)} disabled={taking} className="bg-green-600 hover:bg-green-700 text-slate-950 font-extrabold border-none rounded-sm px-3 py-1 cursor-pointer text-xs disabled:opacity-60">
                 {taking ? "Saving…" : "✓ Confirm"}
               </button>
-              <button onClick={() => setTakeOpen(null)} style={{ background: "transparent", color: "#8e9ba9", border: "1px solid #2a3342", borderRadius: "6px", padding: "6px 12px", cursor: "pointer", fontSize: "12px" }}>Cancel</button>
+              <button onClick={() => setTakeOpen(null)} className="bg-transparent text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-600 rounded-sm px-3 py-1 cursor-pointer text-xs">Cancel</button>
             </div>
             {!r.liveSignal && (
-              <div style={{ color: "#f59e0b", fontSize: "11px", marginTop: "7px" }}>⚠️ Is stock pe abhi LIVE signal nahi hai — apne broker ka ACTUAL entry price daalo, purane backtest price pe mat jao.</div>
+              <div className="text-amber-500 text-[10px] mt-1.5">⚠️ Is stock pe abhi LIVE signal nahi hai — apne broker ka ACTUAL entry price daalo, purane backtest price pe mat jao.</div>
             )}
-            {takeMsg && <div style={{ marginTop: "6px", color: takeMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>{takeMsg}</div>}
+            {takeMsg && <div className={`mt-1.5 ${takeMsg.startsWith("✅") ? "text-green-500" : "text-red-500"}`}>{takeMsg}</div>}
           </div>
         )}
       </div>
@@ -271,35 +323,45 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
   const renderTodayPlan = (r: LedgerRow) => {
     if (playbackDate && r.openPosition && !r.liveSignal) {
       return (
-        <div style={{ marginBottom: "12px", padding: "10px 12px", borderRadius: "8px", background: "rgba(251,191,36,0.07)", border: "1px solid rgba(251,191,36,0.35)", fontFamily: "monospace", fontSize: "12.5px", color: "#f5e3b8" }}>
-          <div style={{ fontWeight: 700, color: "#fbbf24", marginBottom: "4px" }}>🟡 Position OPEN on this date</div>
-          <div>Strategy is date pe position mein tha — entry <strong>{r.openPosition.entryDate}</strong> @ <strong>₹{Math.round(r.openPosition.entryPrice)}</strong>. Exit abhi future mein hai (spoiler nahi denge 😄) — din aage badha ke dekho.</div>
+        <div className="mb-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/35 font-mono text-xs text-amber-100">
+          <div className="font-bold text-amber-400 mb-1">🟡 Position OPEN on this date</div>
+          <div>Strategy is date pe position mein tha — entry <strong>{r.openPosition.entryDate}</strong> @ <strong>₹{Math.round(r.openPosition.entryPrice)}</strong>. Exit abhi future mein hai — din aage badha ke dekho.</div>
         </div>
       );
     }
     if (r.liveSignal && r.livePrice) {
       const entry = r.livePrice;
-      // M2's tested rule is a −5% stop / +15% target; showing −8% here contradicted the
-      // strategy that produced the stats. Other strategies keep the generic −8% guard.
       const isM2 = r.strategyId === "m2_rounding_bottom";
-      const stopPct = isM2 ? 5 : 8;
-      const stop = Math.round(entry * (1 - stopPct / 100));
-      const target = isM2 ? Math.round(entry * 1.15) : Math.round(entry * (1 + r.avgReturnPct / 100));
-      const targetLabel = isM2 ? "+15% rule" : `+${r.avgReturnPct.toFixed(1)}% avg`;
+      const isM4 = r.strategyId === "m4_divergence";
+      
+      let stop = 0, target = 0, stopPct = 0, targetLabel = "";
+
+      if (isM4 && r.liveStop && r.liveTarget) {
+        stop = Math.round(r.liveStop);
+        target = Math.round(r.liveTarget);
+        stopPct = Math.round(((entry - stop) / entry) * 100);
+        targetLabel = "structural pivot rule";
+      } else {
+        stopPct = isM2 ? 5 : 8;
+        stop = Math.round(entry * (1 - stopPct / 100));
+        target = isM2 ? Math.round(entry * 1.15) : Math.round(entry * (1 + r.avgReturnPct / 100));
+        targetLabel = isM2 ? "+15% rule" : `+${r.avgReturnPct.toFixed(1)}% avg`;
+      }
+
       const risk = entry - stop;
       const reward = target - entry;
       const rr = risk > 0 ? (reward / risk).toFixed(1) : "—";
       return (
-        <div style={{ marginBottom: "12px", padding: "10px 12px", borderRadius: "8px", background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.35)", fontFamily: "monospace", fontSize: "12.5px", color: "#c9f5d6" }}>
-          <div style={{ fontWeight: 700, color: "#22c55e", marginBottom: "4px" }}>📍 {playbackDate ? `Signal on ${playbackDate} (as-of close that day)` : "LIVE setup (as of latest close)"}</div>
+        <div className="mb-3 p-3 rounded-lg bg-green-500/5 border border-green-500/35 font-mono text-xs text-green-100">
+          <div className="font-bold text-green-400 mb-1">📍 {playbackDate ? `Signal on ${playbackDate} (as-of close that day)` : "LIVE setup (as of latest close)"}</div>
           <div>Entry zone ≈ <strong>₹{entry}</strong> · Stop-loss <strong>₹{stop}</strong> (−{stopPct}%) · Target ≈ <strong>₹{target}</strong> ({targetLabel}) · R:R ≈ 1:{rr}</div>
-          <div style={{ color: "#8e9ba9", fontSize: "11px", marginTop: "5px" }}>Enter only if price is still near the entry zone (not already run up). Backtest-derived levels — educational, not financial advice.</div>
+          <div className="text-slate-500 text-[10px] mt-1.5">Enter only if price is still near the entry zone. Backtest-derived levels — educational, not financial advice.</div>
         </div>
       );
     }
     return (
-      <div style={{ marginBottom: "12px", padding: "10px 12px", borderRadius: "8px", background: "rgba(142,155,169,0.08)", border: "1px solid #2a3342", fontFamily: "monospace", fontSize: "12.5px", color: "#a7b2c0" }}>
-        <div style={{ fontWeight: 700, color: "#8e9ba9", marginBottom: "4px" }}>⚪ No live entry today — history only</div>
+      <div className="mb-3 p-3 rounded-lg bg-slate-500/5 border border-slate-700 font-mono text-xs text-slate-400">
+        <div className="font-bold text-slate-400 mb-1">⚪ No live entry today — history only</div>
         <div>
           The trades below are <strong>past backtest signals</strong>{r.lastEntryPrice ? ` (last one entered at ₹${Math.round(r.lastEntryPrice)}, long gone)` : ""}. Don't buy at those old prices. Wait for a <strong>LIVE</strong> signal — use the “LIVE Signals Only” filter to see stocks that are entry-ready now.
         </div>
@@ -346,18 +408,18 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
     const key = r.tradesKey || `${r.symbol}__${r.strategyId}`;
     const all = tradesCache[key];
     if (loadingKey === key || all === undefined) {
-      return <div style={{ padding: "14px", color: "#8e9ba9", fontFamily: "monospace", fontSize: "12px" }}>Loading trade history…</div>;
+      return <div className="p-4 text-slate-400 font-mono text-xs">Loading trade history…</div>;
     }
     const filtered = all
       .filter((t) => t.entryDate >= historyStart)
       .sort((a, b) => b.entryDate.localeCompare(a.entryDate));
     if (!filtered.length) {
       return (
-        <div style={{ padding: "12px 14px" }}>
+        <div className="p-3">
           {renderTodayPlan(r)}
           {renderTakeSection(r)}
           {renderOOS(all)}
-          <div style={{ color: "#8e9ba9", fontFamily: "monospace", fontSize: "12px" }}>
+          <div className="text-slate-400 font-mono text-xs">
             No signals found since <strong>{formatDateHuman(historyStart)}</strong> (out of {all.length} total backtest signals).
           </div>
         </div>
@@ -367,44 +429,44 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
     const losses = filtered.length - wins;
     const wr = Math.round((wins / filtered.length) * 100);
     return (
-      <div style={{ padding: "12px 14px" }}>
+      <div className="p-3">
         {renderTodayPlan(r)}
         {renderTakeSection(r)}
         {renderOOS(all)}
-        <div style={{ marginBottom: "12px", fontSize: "13px", color: "#c9d3df", fontFamily: "monospace", display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
-          <span style={{ backgroundColor: "rgba(59, 130, 246, 0.15)", color: "#60a5fa", border: "1px solid rgba(59, 130, 246, 0.3)", padding: "2px 6px", borderRadius: "4px", fontSize: "11px", fontWeight: "bold" }}>
+        <div className="mb-3 text-xs text-slate-300 font-mono flex flex-wrap items-center gap-2">
+          <span className="bg-blue-500/15 text-blue-400 border border-blue-500/30 px-1.5 py-0.5 rounded-sm text-[10px] font-bold">
             DATE FILTER ACTIVE
           </span>
           <span>
             Showing <strong>{filtered.length}</strong> of <strong>{all.length}</strong> total backtest signals since <strong>{formatDateHuman(historyStart)}</strong> —{" "}
-            <span className="text-success">{wins} profit</span> ·{" "}
-            <span className="text-danger">{losses} loss</span> · <strong>{wr}% win rate</strong>
+            <span className="text-green-400">{wins} profit</span> ·{" "}
+            <span className="text-red-400">{losses} loss</span> · <strong>{wr}% win rate</strong>
           </span>
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px" }}>
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-xs">
             <thead>
-              <tr style={{ color: "#8e9ba9", textAlign: "left" }}>
-                <th style={{ padding: "6px 10px" }}>Entry Date</th>
-                <th style={{ padding: "6px 10px" }}>Exit Date</th>
-                <th style={{ padding: "6px 10px" }}>Entry ₹</th>
-                <th style={{ padding: "6px 10px" }}>Exit ₹</th>
-                <th style={{ padding: "6px 10px" }}>Return</th>
-                <th style={{ padding: "6px 10px" }}>Result</th>
+              <tr className="text-slate-400 text-left">
+                <th className="p-2">Entry Date</th>
+                <th className="p-2">Exit Date</th>
+                <th className="p-2">Entry ₹</th>
+                <th className="p-2">Exit ₹</th>
+                <th className="p-2">Return</th>
+                <th className="p-2">Result</th>
               </tr>
             </thead>
             <tbody>
               {filtered.map((t, j) => (
-                <tr key={j} style={{ borderTop: "1px solid #1b2230" }}>
-                  <td className="mono" style={{ padding: "6px 10px" }}>{t.entryDate}</td>
-                  <td className="mono" style={{ padding: "6px 10px" }}>{t.exitDate}</td>
-                  <td className="mono" style={{ padding: "6px 10px" }}>{t.entryPrice}</td>
-                  <td className="mono" style={{ padding: "6px 10px" }}>{t.exitPrice}</td>
-                  <td className={`mono ${t.win ? "text-success" : "text-danger"}`} style={{ padding: "6px 10px" }}>
+                <tr key={j} className="border-t border-slate-800">
+                  <td className="p-2 font-mono">{t.entryDate}</td>
+                  <td className="p-2 font-mono">{t.exitDate}</td>
+                  <td className="p-2 font-mono">{t.entryPrice}</td>
+                  <td className="p-2 font-mono">{t.exitPrice}</td>
+                  <td className={`p-2 font-mono ${t.win ? "text-green-400" : "text-red-400"}`}>
                     {(t.returnPct >= 0 ? "+" : "") + t.returnPct}%
                   </td>
-                  <td style={{ padding: "6px 10px" }}>
-                    <span className={`badge ${t.win ? "badge-success" : "badge-danger"}`}>{t.win ? "PROFIT" : "LOSS"}</span>
+                  <td className="p-2">
+                    <span className={`px-1.5 py-0.5 rounded-sm text-[10px] font-bold ${t.win ? "bg-green-500/20 text-green-400" : "bg-red-500/20 text-red-400"}`}>{t.win ? "PROFIT" : "LOSS"}</span>
                   </td>
                 </tr>
               ))}
@@ -416,45 +478,45 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
   };
 
   return (
-    <div className="ledger-wrap">
-      <table className="ledger">
+    <div className="ledger-wrap overflow-x-auto">
+      <table className="ledger min-w-full">
         <thead>
           <tr>
-            <th className="l sortable" onClick={() => onSort("symbol")}>
+            <th className="l sortable cursor-pointer" onClick={() => onSort("symbol")}>
               Stock {renderSortIcon("symbol")}
             </th>
             {showStrategy && (
-              <th className="l sortable" onClick={() => onSort("strategyLabel")}>
+              <th className="l sortable cursor-pointer" onClick={() => onSort("strategyLabel")}>
                 Strategy {renderSortIcon("strategyLabel")}
               </th>
             )}
-            <th className="l">Entry Condition</th>
-            <th className="sortable" onClick={() => onSort("lastEntryPrice")}>
+            <th className="l text-left p-3">Entry Condition</th>
+            <th className="sortable cursor-pointer" onClick={() => onSort("lastEntryPrice")}>
               Entry ₹ {renderSortIcon("lastEntryPrice")}
             </th>
-            <th className="l">Exit Condition</th>
-            <th className="sortable" onClick={() => onSort("lastExitPrice")}>
+            <th className="l text-left p-3">Exit Condition</th>
+            <th className="sortable cursor-pointer" onClick={() => onSort("lastExitPrice")}>
               Exit ₹ {renderSortIcon("lastExitPrice")}
             </th>
-            <th className="sortable" onClick={() => onSort("lastReturnPct")}>
+            <th className="sortable cursor-pointer" onClick={() => onSort("lastReturnPct")}>
               Return {renderSortIcon("lastReturnPct")}
             </th>
-            <th className="sortable" onClick={() => onSort("winRatePct")}>
+            <th className="sortable cursor-pointer" onClick={() => onSort("winRatePct")}>
               Win% {renderSortIcon("winRatePct")}
             </th>
-            <th className="sortable" onClick={() => onSort("profitFactor")}>
+            <th className="sortable cursor-pointer" onClick={() => onSort("profitFactor")}>
               PF {renderSortIcon("profitFactor")}
             </th>
-            <th className="sortable" onClick={() => onSort("numTrades")}>
+            <th className="sortable cursor-pointer" onClick={() => onSort("numTrades")}>
               Trades {renderSortIcon("numTrades")}
             </th>
-            <th className="sortable" onClick={() => onSort("avgReturnPct")}>
+            <th className="sortable cursor-pointer" onClick={() => onSort("avgReturnPct")}>
               Avg {renderSortIcon("avgReturnPct")}
             </th>
-            <th className="sortable" onClick={() => onSort("maxDrawdownPct")}>
+            <th className="sortable cursor-pointer" onClick={() => onSort("maxDrawdownPct")}>
               MaxDD {renderSortIcon("maxDrawdownPct")}
             </th>
-            <th className="sortable" onClick={() => onSort("liveSignal")}>
+            <th className="sortable cursor-pointer" onClick={() => onSort("liveSignal")}>
               Signal {renderSortIcon("liveSignal")}
             </th>
           </tr>
@@ -463,12 +525,7 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
           {rows.map((r, i) => {
             const cleanSym = r.symbol.replace(".NS", "");
             const returnPct = r.lastReturnPct;
-            const status = returnPct !== null && returnPct !== undefined ? (returnPct > 0 ? "win" : "loss") : null;
-            const stats = r;
-            const live = r.liveSignal;
-            const dp = r.patternDepth;
-            const dm = r.patternDuration;
-
+            
             let returnClass = "badge-neutral";
             if (returnPct !== null && returnPct !== undefined) {
               returnClass = returnPct >= 0 ? "badge-success" : "badge-danger";
@@ -484,16 +541,30 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
                 <tr className={r.liveSignal ? "row-live" : ""}>
                   <td className="l sym" style={{ cursor: "pointer" }} onClick={() => toggleRow(r)} title="Click to view full signal history">
                     <div className="sym-box">
-                      <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                        <span style={{ color: "#fbbf24", fontFamily: "monospace", width: "10px", display: "inline-block" }}>{isOpen ? "▾" : "▸"}</span>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-amber-500 font-mono w-[10px] inline-block">{isOpen ? "▾" : "▸"}</span>
                         <span className="sym-ticker">{cleanSym}</span>
+                        
+                        {r.hasChart && onOpenChart && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onOpenChart(r.symbol, r.name);
+                            }}
+                            className="bg-purple-900/40 hover:bg-purple-800/80 text-purple-300 border border-purple-500/35 px-1 rounded-sm text-[9.5px] font-bold cursor-pointer flex items-center gap-0.5"
+                            title="Open interactive divergence chart"
+                          >
+                            📈 Chart
+                          </button>
+                        )}
+
                         {r.isSynthetic && (
-                          <span style={{ fontSize: "10px", backgroundColor: "rgba(245, 158, 11, 0.15)", color: "#f59e0b", border: "1px solid rgba(245, 158, 11, 0.3)", padding: "0px 4px", borderRadius: "3px", fontWeight: "normal", fontFamily: "monospace" }}>
+                          <span className="text-[10px] bg-amber-500/15 text-amber-500 border border-amber-500/30 px-1 py-0 rounded-sm font-normal font-mono">
                             SYNTHETIC
                           </span>
                         )}
                         {strictHighlight && isStrict && (
-                          <span style={{ fontSize: "10px", backgroundColor: "rgba(34, 197, 94, 0.15)", color: "#22c55e", border: "1px solid rgba(34, 197, 94, 0.4)", padding: "0px 5px", borderRadius: "3px", fontWeight: 700, fontFamily: "monospace" }}>
+                          <span className="text-[10px] bg-green-500/15 text-green-500 border border-green-500/40 px-1.5 py-0 rounded-sm font-bold font-mono">
                             STRICT ✓
                           </span>
                         )}
@@ -502,27 +573,27 @@ export function Ledger({ rows, showStrategy, sortField, sortAsc, onSort, history
                     </div>
                   </td>
                   {showStrategy && <td className="l strategy-cell">{r.strategyLabel}</td>}
-                  <td className="cond entry-cond">{r.entryCond}</td>
-                  <td className="mono font-semibold">{fmt(r.lastEntryPrice)}</td>
-                  <td className="cond exit-cond">{r.exitCond}</td>
-                  <td className="mono font-semibold">{fmt(r.lastExitPrice)}</td>
-                  <td>
+                  <td className="cond entry-cond text-left p-3">{r.entryCond}</td>
+                  <td className="mono font-semibold text-center p-3">{fmt(r.lastEntryPrice)}</td>
+                  <td className="cond exit-cond text-left p-3">{r.exitCond}</td>
+                  <td className="mono font-semibold text-center p-3">{fmt(r.lastExitPrice)}</td>
+                  <td className="text-center p-3">
                     <span className={`badge ${returnClass}`}>
                       {returnPct === null || returnPct === undefined ? "—" : (returnPct >= 0 ? "+" : "") + fmt(returnPct) + "%"}
                     </span>
                   </td>
-                  <td className="mono">{fmt(r.winRatePct, 1)}%</td>
-                  <td>
+                  <td className="mono text-center p-3">{fmt(r.winRatePct, 1)}%</td>
+                  <td className="text-center p-3">
                     <span className={`pf-value ${r.profitFactor >= 2 ? "pf-premium" : "pf-standard"}`}>
                       {fmt(r.profitFactor, 2)}
                     </span>
                   </td>
-                  <td className="mono">{r.numTrades}</td>
-                  <td className={`mono ${avgReturnClass}`}>
+                  <td className="mono text-center p-3">{r.numTrades}</td>
+                  <td className={`mono ${avgReturnClass} text-center p-3`}>
                     {(r.avgReturnPct >= 0 ? "+" : "") + fmt(r.avgReturnPct) + "%"}
                   </td>
-                  <td className="mono text-danger-dim">{fmt(r.maxDrawdownPct, 1)}%</td>
-                  <td>
+                  <td className="mono text-danger-dim text-center p-3">{fmt(r.maxDrawdownPct, 1)}%</td>
+                  <td className="text-center p-3">
                     {r.liveSignal ? (
                       <span className="live-pill"><span className="pulse-dot" />LIVE</span>
                     ) : (

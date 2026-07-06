@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
 import { Ledger, type LedgerRow } from "./components/Ledger.tsx";
 import { MyTrades } from "./components/MyTrades.tsx";
+import { DivergenceChart } from "./components/DivergenceChart.tsx";
 
 interface Meta {
   needsScan?: boolean;
@@ -25,7 +26,7 @@ interface Meta {
     breadth: { label: string; gatePasses: number; medianPF: number }[];
   };
   roundingBottomConditions?: { totalTrades: number; byDepth: Bucketed; byDuration: Bucketed };
-  counts?: { module1: number; module2: number; module3: number };
+  counts?: { module1: number; module2: number; module3: number; module4: number };
   passed?: number;
 }
 
@@ -38,14 +39,16 @@ const TABS = [
   { n: 1, key: "opt", label: "AI Strategy Optimizer" },
   { n: 2, key: "rb", label: "Rounding Bottom" },
   { n: 3, key: "best", label: "Best Overall Edge" },
-  { n: 4, key: "journal", label: "My Trades" },
+  { n: 4, key: "div", label: "Divergence Scanner" },
+  { n: 5, key: "journal", label: "My Trades" },
 ] as const;
 
 const DESC: Record<number, string> = {
   1: "Analyzes each stock to evaluate and select its highest-performing backtest strategy (RSI, MACD, EMA, Bollinger, and ADX combinations) using a full-history daily single-pass evaluation.",
   2: "Detects rounding bottom (U-shaped) consolidation bases (12-33% cup depth) on full-history charts. Confirms pattern parameters, monitors breakout structures, and tracks precise entry and exit statistics.",
   3: "Identifies the single high-probability technical strategy that registers the greatest number of breadth passes across the entire Nifty 500 universe to maximize robustness.",
-  4: "Your personal trade journal — tick a trade you're taking, and it auto-tracks whether the stop-loss or target gets hit on real daily data, then helps you review and learn from every outcome.",
+  4: "Detects RSI (14) bullish divergences (price lower-low, RSI higher-low from oversold) on daily candles. Triggers entries on pivot confirmation with structure-based stop-losses and 2R targets, viewable via stacked visual chart panels.",
+  5: "Your personal trade journal — tick a trade you're taking, and it auto-tracks whether the stop-loss or target gets hit on real daily data, then helps you review and learn from every outcome.",
 };
 
 export default function App() {
@@ -66,6 +69,10 @@ export default function App() {
   const [sortField, setSortField] = useState<keyof LedgerRow | null>(null);
   const [sortAsc, setSortAsc] = useState(false);
   const [journalCount, setJournalCount] = useState<number | null>(null);
+
+  // Divergence Chart state
+  const [chartSymbol, setChartSymbol] = useState<string | null>(null);
+  const [chartName, setChartName] = useState<string | null>(null);
 
   // Load journal count once for the tab badge
   useEffect(() => {
@@ -166,11 +173,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pbPlaying, pbOn, pbSpeedMs, pbDate]);
 
-  // PRACTICE-TRADE WATCHDOG: on every virtual-date move (step OR auto-play, any tab),
-  // resolve open practice trades against candles up to that day. If a stop-loss or
-  // target hits, AUTO-PAUSE so the moment is never skipped past. Skipped entirely when
-  // no open trades (zero useless calls), and a busy-lock stops turbo-speed pileups —
-  // safe because each check is cumulative up to the latest date.
+  // PRACTICE-TRADE WATCHDOG: on every virtual-date move
   useEffect(() => {
     if (!pbOn || !pbDate || pbOpenCount === 0 || pbCheckBusy.current) return;
     pbCheckBusy.current = true;
@@ -286,10 +289,6 @@ export default function App() {
     startScanning(); // scan first; the polling effect calls publishCache() when it finishes
   };
 
-  // Prefer the server's VALIDATED endpoints (/api/*) — they run staleness checks against
-  // the recorded gates. Fall back to the static /cache files only if the API is
-  // unreachable (pure static hosting). Previously the API existed but was never called,
-  // so the whole validation layer was dead code.
   const fetchMeta = (): Promise<Meta> =>
     fetch(`/api/meta?t=${Date.now()}`)
       .then((r) => { if (!r.ok) throw new Error("api down"); return r.json(); })
@@ -313,7 +312,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (tab === 4) { setRows([]); setLoading(false); return; } // journal tab has no module cache
+    if (tab === 5) { setRows([]); setLoading(false); return; } // journal tab has no module cache
     setLoading(true);
     fetchModule(tab)
       .then(setRows)
@@ -377,7 +376,6 @@ export default function App() {
   };
 
   const filteredAndSortedRows = useMemo(() => {
-    // TIME MACHINE: when playback is on, rows come from the as-of snapshot, not today's cache
     const sourceRows: LedgerRow[] = pbOn ? ((pbSnap?.["module" + tab] as LedgerRow[]) ?? []) : rows;
     let result = [...sourceRows];
     if (searchQuery.trim()) {
@@ -415,8 +413,7 @@ export default function App() {
   }, [rows, searchQuery, liveOnly, sortField, sortAsc, pbOn, pbSnap, tab]);
 
   const g = meta?.gate;
-  const needsScan = meta?.needsScan && !pbOn; // playback has its own data source — cache staleness doesn't apply
-  // Effective (playback-aware) values for badges/cards — swap to the snapshot when time-traveling
+  const needsScan = meta?.needsScan && !pbOn; // playback has its own data source
   const effCounts = pbOn ? pbSnap?.counts : meta?.counts;
   const effModule3 = pbOn ? pbSnap?.module3Meta : meta?.module3;
   const effRB = pbOn ? pbSnap?.roundingBottomConditions : meta?.roundingBottomConditions;
@@ -533,7 +530,7 @@ export default function App() {
       )}
 
       {meta && !needsScan && (
-        <section className="stats-dashboard">
+        <section className="stats-dashboard grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="stat-card">
             <span className="stat-label">Universe Size</span>
             <span className="stat-value">{meta.universeCount} Symbols</span>
@@ -558,32 +555,52 @@ export default function App() {
           <div className="stat-card highlights">
             <span className="stat-label">Passed Gates</span>
             <span className="stat-value text-gold">
-              {pbOn ? ((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0)) : (meta.passed ?? ((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0)))} <span className="stat-value-sub">Total</span>
+              {pbOn ? ((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)) : (meta.passed ?? ((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)))} <span className="stat-value-sub">Total</span>
             </span>
-            <div className="stat-split-bar">
+            <div className="stat-split-bar flex h-2 rounded-full overflow-hidden mt-1.5">
               <span
-                className="stat-split-1"
+                className="stat-split-1 bg-amber-500"
                 style={{
                   width: `${
                     ((effCounts?.module1 || 0) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0)) || 1)) *
+                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)) || 1)) *
                     100
                   }%`,
                 }}
               />
               <span
-                className="stat-split-2"
+                className="stat-split-2 bg-blue-500"
                 style={{
                   width: `${
-                    (((effCounts?.module2 || 0) + (effCounts?.module3 || 0)) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0)) || 1)) *
+                    ((effCounts?.module2 || 0) /
+                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)) || 1)) *
+                    100
+                  }%`,
+                }}
+              />
+              <span
+                className="stat-split-3 bg-purple-500"
+                style={{
+                  width: `${
+                    ((effCounts?.module3 || 0) /
+                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)) || 1)) *
+                    100
+                  }%`,
+                }}
+              />
+              <span
+                className="stat-split-4 bg-emerald-500"
+                style={{
+                  width: `${
+                    ((effCounts?.module4 || 0) /
+                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)) || 1)) *
                     100
                   }%`,
                 }}
               />
             </div>
-            <span className="stat-sub">
-              M1: {effCounts?.module1 ?? 0} · M2: {effCounts?.module2 ?? 0} · M3: {effCounts?.module3 ?? 0}
+            <span className="stat-sub text-xs">
+              M1: {effCounts?.module1 ?? 0} · M2: {effCounts?.module2 ?? 0} · M3: {effCounts?.module3 ?? 0} · M4: {effCounts?.module4 ?? 0}
             </span>
           </div>
           <div className="stat-card">
@@ -607,7 +624,7 @@ export default function App() {
       {pbOn ? (
         <div className="last-updated-bar" style={{ borderColor: "rgba(168,85,247,0.4)", color: "#c084fc" }}>
           <span className="pulse-indicator" style={{ background: "#a855f7" }} />
-          🕰 Time machine active — dashboard as of {pbDate} (close). Aaj ke data pe wapas jaane ke liye "Return to Today" dabao.
+          Time machine active — dashboard as of {pbDate} (close). Aaj ke data pe wapas jaane ke liye "Return to Today" dabao.
         </div>
       ) : meta && meta.generatedAt && (
         <div className="last-updated-bar">
@@ -625,7 +642,7 @@ export default function App() {
           >
             <span className="num">{String(t.n).padStart(2, "0")}</span>
             <span className="tab-text">{t.label}</span>
-            {t.n === 4 ? (
+            {t.n === 5 ? (
               (pbOn ? pbJournalCount : journalCount) !== null && <span className="count">{pbOn ? pbJournalCount : journalCount}</span>
             ) : (
               effCounts && (
@@ -643,7 +660,7 @@ export default function App() {
             <p>{DESC[tab]}</p>
           </div>
           {!needsScan && sourceRowsLen > 0 && (
-            <div className="controls-row">
+            <div className="controls-row flex flex-wrap gap-3 items-center justify-between">
               <div className="search-box">
                 <span className="search-icon">🔍</span>
                 <input
@@ -658,35 +675,37 @@ export default function App() {
                   </button>
                 )}
               </div>
-              <button
-                className={`toggle-filter-btn ${liveOnly ? "active" : ""}`}
-                onClick={() => setLiveOnly(!liveOnly)}
-              >
-                <span className="toggle-dot" />
-                LIVE Signals Only
-              </button>
-              {tab === 2 && (
+              <div className="flex gap-2 flex-wrap items-center">
                 <button
-                  className={`toggle-filter-btn ${m2Strict ? "active" : ""}`}
-                  onClick={() => setM2Strict(!m2Strict)}
-                  title="Highlight rounding-bottom rows that also meet the strict standard: 15+ trades & PF >= 2.5"
+                  className={`toggle-filter-btn ${liveOnly ? "active" : ""}`}
+                  onClick={() => setLiveOnly(!liveOnly)}
                 >
                   <span className="toggle-dot" />
-                  Strict (15 / PF 2.5)
+                  LIVE Signals Only
                 </button>
-              )}
-              <div className="history-date-box" style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#8e9ba9" }}>
-                <span>Signals since</span>
-                <input
-                  type="date"
-                  value={historyStart}
-                  max={new Date().toISOString().slice(0, 10)}
-                  onChange={(e) => setHistoryStart(e.target.value)}
-                  style={{ background: "#0f141c", border: "1px solid #212836", color: "#e6edf5", borderRadius: "6px", padding: "4px 8px", fontFamily: "monospace" }}
-                />
-              </div>
-              <div className="rows-count-badge">
-                Showing {filteredAndSortedRows.length} of {sourceRowsLen}
+                {tab === 2 && (
+                  <button
+                    className={`toggle-filter-btn ${m2Strict ? "active" : ""}`}
+                    onClick={() => setM2Strict(!m2Strict)}
+                    title="Highlight rounding-bottom rows that also meet the strict standard: 15+ trades & PF >= 2.5"
+                  >
+                    <span className="toggle-dot" />
+                    Strict (15 / PF 2.5)
+                  </button>
+                )}
+                <div className="history-date-box" style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#8e9ba9" }}>
+                  <span>Signals since</span>
+                  <input
+                    type="date"
+                    value={historyStart}
+                    max={new Date().toISOString().slice(0, 10)}
+                    onChange={(e) => setHistoryStart(e.target.value)}
+                    style={{ background: "#0f141c", border: "1px solid #212836", color: "#e6edf5", borderRadius: "6px", padding: "4px 8px", fontFamily: "monospace" }}
+                  />
+                </div>
+                <div className="rows-count-badge bg-[#151b27] px-2.5 py-1 rounded-md text-xs border border-slate-800 text-[#8e9ba9] font-mono">
+                  Showing {filteredAndSortedRows.length} of {sourceRowsLen}
+                </div>
               </div>
             </div>
           )}
@@ -701,14 +720,14 @@ export default function App() {
                     <label>From <input type="date" value={pnlFrom} onChange={(e) => setPnlFrom(e.target.value)} style={{ background: "#0f141c", color: "#e6edf5", border: "1px solid #212836", borderRadius: "6px", padding: "4px 8px", fontFamily: "monospace" }} /></label>
                     <label>To <input type="date" value={pnlTo} onChange={(e) => setPnlTo(e.target.value)} style={{ background: "#0f141c", color: "#e6edf5", border: "1px solid #212836", borderRadius: "6px", padding: "4px 8px", fontFamily: "monospace" }} /></label>
                     <button className="toggle-filter-btn" onClick={() => setPnlScope("tab")} style={{ opacity: pnlScope === "tab" ? 1 : 0.5 }}>This module</button>
-                    <button className="toggle-filter-btn" onClick={() => setPnlScope("all")} style={{ opacity: pnlScope === "all" ? 1 : 0.5 }}>All 3 modules</button>
+                    <button className="toggle-filter-btn" onClick={() => setPnlScope("all")} style={{ opacity: pnlScope === "all" ? 1 : 0.5 }}>All 4 modules</button>
                   </div>
                   {allTradesData === null ? (
                     <div style={{ color: "#8e9ba9" }}>Loading trades…</div>
                   ) : pnl && pnl.n > 0 ? (
                     <div>
                       <div style={{ fontSize: "14px", marginBottom: "6px" }}>
-                        <strong>{pnl.n}</strong> trades entered ({pnlScope === "all" ? "all 3 modules" : TABS[tab - 1].label}):{" "}
+                        <strong>{pnl.n}</strong> trades entered ({pnlScope === "all" ? "all 4 modules" : TABS[tab - 1].label}):{" "}
                         <span className="text-success">{pnl.wins} win</span> · <span className="text-danger">{pnl.losses} loss</span> · <strong>{pnl.wr}% win rate</strong>
                       </div>
                       <div>
@@ -722,7 +741,7 @@ export default function App() {
                       </div>
                     </div>
                   ) : (
-                    <div style={{ color: "#8e9ba9" }}>No trades entered between {pnlFrom} and {pnlTo}. (If it says this for every range, redeploy so alltrades.json is generated.)</div>
+                    <div style={{ color: "#8e9ba9" }}>No trades entered between {pnlFrom} and {pnlTo}.</div>
                   )}
                 </div>
               )}
@@ -730,7 +749,7 @@ export default function App() {
           )}
         </div>
 
-        {tab === 4 ? (
+        {tab === 5 ? (
           <MyTrades
             key={pbOn ? "pb" : "live"}
             mode={pbOn ? "playback" : "live"}
@@ -827,7 +846,7 @@ export default function App() {
         ) : (
           <Ledger
             rows={filteredAndSortedRows}
-            showStrategy={tab !== 2}
+            showStrategy={tab !== 2 && tab !== 4}
             sortField={sortField}
             sortAsc={sortAsc}
             onSort={handleSort}
@@ -835,6 +854,10 @@ export default function App() {
             strictHighlight={tab === 2 && m2Strict}
             playbackDate={pbOn ? pbDate : null}
             onTradeTaken={() => (pbOn ? (setPbJournalCount((c) => (c ?? 0) + 1), setPbOpenCount((c) => c + 1)) : setJournalCount((c) => (c ?? 0) + 1))}
+            onOpenChart={(symbol, name) => {
+              setChartSymbol(symbol);
+              setChartName(name);
+            }}
           />
         )}
 
@@ -878,7 +901,7 @@ export default function App() {
 
       {/* Real-time Scan Terminal overlay */}
       {scanStatus.isScanning && (
-        <div className="fixed inset-0 bg-[#080b11]/80 backdrop-blur-md z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-[#080b11]/80 backdrop-blur-md z-[1000] flex items-center justify-center p-4">
           <div className="bg-[#0f141c] border border-[#212836] rounded-xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col max-h-[85vh]">
             {/* Modal Header */}
             <div className="p-4 border-b border-[#181f2c] flex justify-between items-center bg-[#151b27]">
@@ -925,6 +948,18 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {chartSymbol && (
+        <DivergenceChart
+          symbol={chartSymbol}
+          name={chartName || undefined}
+          asOf={pbOn ? pbDate : null}
+          onClose={() => {
+            setChartSymbol(null);
+            setChartName(null);
+          }}
+        />
       )}
     </div>
   );
