@@ -473,7 +473,7 @@ app.get("/api/playback/snapshot", (req, res) => {
     }
     if (best.passedStrict) {
       const live = st.strategies[bestId].signals.find((sg) => sg.d === D);
-      module1Rows.push(mkRow(st, bestId, best, live));
+      module1Rows.push(mkRow(st, bestId, best, live, { fields: { liveStop: live?.stop ?? null, liveTarget: live?.tgt ?? null } }));
     }
 
     // Module 2 as-of D
@@ -514,7 +514,7 @@ app.get("/api/playback/snapshot", (req, res) => {
     const r = results[winner.id];
     if (r && r.passedStrict) {
       const live = st.strategies[winner.id].signals.find((sg) => sg.d === D);
-      module3Rows.push(mkRow(st, winner.id, r, live, { fields: { strategyId: "m3_best_overall" } }));
+      module3Rows.push(mkRow(st, winner.id, r, live, { fields: { strategyId: "m3_best_overall", liveStop: live?.stop ?? null, liveTarget: live?.tgt ?? null } }));
     }
   }
 

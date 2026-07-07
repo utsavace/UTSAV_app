@@ -463,9 +463,9 @@ const FETCH_RETRIES = 3;        // Yahoo retry attempts with backoff (rate-limit
 export const CUP_WINDOWS = [252, 189, 126]; // rounding-bottom base windows ≈ 12 / 9 / 6 months (longest preferred)
 
 export const STRATEGIES_POOL = [
-  { id: "m1_rsi_macd", label: "RSI(14) + MACD Cross", entry: "RSI < 40 and MACD histogram turns positive in oversold zone", exit: "RSI > 70 or MACD histogram < 0" },
-  { id: "m1_ema_pullback", label: "EMA 50 Pullback + Volume", entry: "Price touches 50 EMA with volume > 1.5x average", exit: "EMA 20 crossover" },
-  { id: "m1_bb_squeeze", label: "Bollinger Bands Squeeze Breakout", entry: "BB Bandwidth < 0.05 followed by daily close above Upper Band", exit: "Close below middle Band" },
+  { id: "m1_rsi_macd", label: "RSI(14) + MACD Cross", entry: "RSI < 40 and MACD histogram turns positive in oversold zone", exit: "3x ATR stop-loss / 4.5x ATR target (validated: beats the old RSI>70-or-MACD<0 exit on PF and expectancy)" },
+  { id: "m1_ema_pullback", label: "EMA 50 Pullback + Volume", entry: "Price touches 50 EMA with volume > 1.5x average", exit: "3x ATR stop-loss / 4.5x ATR target (validated: beats the old EMA20-crossover exit on PF and expectancy)" },
+  { id: "m1_bb_squeeze", label: "Bollinger Bands Squeeze Breakout", entry: "BB Bandwidth < 0.05 followed by daily close above Upper Band", exit: "8% stop-loss, fixed 1:2 R:R target (validated: beats the old close-below-middle-band exit on PF and expectancy)" },
   { id: "m1_rsi_mean_rev", label: "RSI Extreme Mean Reversion", entry: "RSI < 25 with daily candle bullish engulfing confirmation", exit: "RSI > 50" },
   { id: "m1_dual_ema", label: "Dual EMA Trend Follower", entry: "9 EMA crosses above 21 EMA in direction of 200 EMA trend", exit: "9 EMA crosses below 21 EMA" },
   { id: "m1_stoch_rsi", label: "Stochastic RSI Trend Filter", entry: "StochRSI K crosses D below 20 with ADX > 25", exit: "StochRSI K crosses D above 80" }
@@ -619,6 +619,38 @@ function calculateStochasticRSI(rsi: number[], period: number = 14, kPeriod: num
   return { k, d };
 }
 
+// Per-strategy exit overrides — validated via compare-sl on the full Nifty 500
+// universe (all 6 M1 strategies tested, native exit vs 6 alternates). Only these
+// 3 strategies showed a clear, high-sample-size improvement over their native
+// indicator-exit; the other 3 (Dual EMA, StochRSI, RSI Mean-Rev) keep native exit
+// — either native already wins, or the sample was too thin (RSI Mean-Rev ~260
+// trades on 500 stocks) to trust the improvement.
+const ATR_EXIT_SL_MULT = 3, ATR_EXIT_TARGET_MULT = 4.5;   // m1_rsi_macd, m1_ema_pullback
+const BB_EXIT_SL_PCT = 8, BB_EXIT_RR = 2;                 // m1_bb_squeeze
+function computeOverrideLevels(strategyId: string, entryPrice: number, atrAtEntry: number): { stop: number; target: number } | null {
+  if (strategyId === "m1_rsi_macd" || strategyId === "m1_ema_pullback") {
+    return { stop: entryPrice - ATR_EXIT_SL_MULT * atrAtEntry, target: entryPrice + ATR_EXIT_TARGET_MULT * atrAtEntry };
+  }
+  if (strategyId === "m1_bb_squeeze") {
+    const stop = entryPrice * (1 - BB_EXIT_SL_PCT / 100);
+    return { stop, target: entryPrice + BB_EXIT_RR * (entryPrice - stop) };
+  }
+  return null; // m1_dual_ema, m1_stoch_rsi, m1_rsi_mean_rev, m2, m4 keep their own native/structural exit
+}
+function calculateATR(data: OHLCV[], period: number = 14): number[] {
+  const atr: number[] = Array(data.length).fill(0);
+  if (data.length < period + 1) return atr;
+  const tr: number[] = [0];
+  for (let i = 1; i < data.length; i++) {
+    const c = data[i], p = data[i - 1];
+    tr.push(Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close)));
+  }
+  let sum = tr.slice(1, period + 1).reduce((a, b) => a + b, 0);
+  atr[period] = sum / period;
+  for (let i = period + 1; i < data.length; i++) atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period;
+  return atr;
+}
+
 function calculateADX(historicalData: OHLCV[], period: number = 14): number[] {
   if (historicalData.length <= period * 2) {
     return Array(historicalData.length).fill(25);
@@ -719,7 +751,8 @@ function backtestStrategy(
   macd: MACDResult,
   bb: BBResult,
   stochRsi: StochRSIResult,
-  adx: number[]
+  adx: number[],
+  atr: number[]
 ): BacktestStats {
   const closes = ohlcv.map(d => d.close);
   const opens = ohlcv.map(d => d.open);
@@ -743,7 +776,10 @@ function backtestStrategy(
   let pendingCupCandidate: { depth: number; months: number } | null = null; // this bar's matched cup (before trigger accept)
   let entryCup: { depth: number; months: number } | null = null;   // m2 cup for the open position
   let signalOnLastBar = false; // fresh trigger on the latest close → actionable LIVE signal
-  const signals: { d: string; p: number; dp?: number; dm?: number }[] = []; // playback: what was LIVE on each date
+  const signals: { d: string; p: number; dp?: number; dm?: number; stop?: number; tgt?: number }[] = []; // playback: what was LIVE on each date
+  const overrideExit = computeOverrideLevels(strategyId, 100, 3) !== null; // true only for m1_rsi_macd, m1_ema_pullback, m1_bb_squeeze
+  let stratStopP = 0, stratTgtP = 0; // ATR/fixed levels locked in at entry, for overrideExit strategies
+  let liveStopOut: number | null = null, liveTargetOut: number | null = null;
 
   // 20-day SMA volume average calculation
   const avgVol20: number[] = [];
@@ -763,6 +799,12 @@ function backtestStrategy(
         entryPrice = opens[i];
         entryDate = dates[i];
         entryCup = pendingCup;
+        if (overrideExit) {
+          const a = atr[i] || entryPrice * 0.03; // fallback ~3% if ATR not warmed up yet
+          const lv = computeOverrideLevels(strategyId, entryPrice, a)!;
+          stratStopP = lv.stop;
+          stratTgtP = lv.target;
+        }
         pendingEntry = false;
         pendingCup = null;
         continue; // exits are evaluated from the next bar onward
@@ -791,19 +833,26 @@ function backtestStrategy(
             pendingCupCandidate = { depth: cup.depth, months: cup.months };
           }
         }
-      } else if (strategyId === "m3_best_overall") {
-        trigger = (ema9[i] || 0) > (ema21[i] || 0) && (ema9[i - 1] || 0) <= (ema21[i - 1] || 0) && (macd.macdLine[i] || 0) > (macd.signalLine[i] || 0);
       }
 
       if (trigger) {
+        let sigStop: number | undefined, sigTgt: number | undefined;
+        if (overrideExit) {
+          const a = atr[i] || price * 0.03;
+          const lv = computeOverrideLevels(strategyId, price, a)!;
+          sigStop = Math.round(lv.stop * 100) / 100;
+          sigTgt = Math.round(lv.target * 100) / 100;
+        }
         signals.push({
           d: dates[i],
           p: Math.round(price * 100) / 100,
-          ...(pendingCupCandidate ? { dp: Math.round(pendingCupCandidate.depth * 10) / 10, dm: pendingCupCandidate.months } : {})
+          ...(pendingCupCandidate ? { dp: Math.round(pendingCupCandidate.depth * 10) / 10, dm: pendingCupCandidate.months } : {}),
+          ...(overrideExit ? { stop: sigStop, tgt: sigTgt } : {})
         });
         if (i === ohlcv.length - 1) {
           // Signal formed on the LATEST close → nothing to backfill, but this IS the live setup
           signalOnLastBar = true;
+          if (overrideExit) { liveStopOut = sigStop ?? null; liveTargetOut = sigTgt ?? null; }
         } else {
           pendingEntry = true;
           pendingCup = pendingCupCandidate;
@@ -813,12 +862,13 @@ function backtestStrategy(
     } else {
       let exit = false;
       let exitPrice = price; // default: exit at close of the exit bar
-      if (strategyId === "m1_rsi_macd") {
-        exit = rsi[i] > 70 || (macd.histogram[i] || 0) < 0;
-      } else if (strategyId === "m1_ema_pullback") {
-        exit = price < (ema21[i] || 0);
-      } else if (strategyId === "m1_bb_squeeze") {
-        exit = price < (bb.middle[i] || 0);
+      if (overrideExit) {
+        // Validated exit (ATR-based for RSI+MACD/EMA Pullback, fixed 8%/1:2R:R for BB Squeeze):
+        // gap-aware, no indicator exit anymore for these 3 strategies.
+        if (opens[i] <= stratStopP) { exit = true; exitPrice = opens[i]; }
+        else if (lows[i] <= stratStopP) { exit = true; exitPrice = stratStopP; }
+        else if (opens[i] >= stratTgtP) { exit = true; exitPrice = opens[i]; }
+        else if (highs[i] >= stratTgtP) { exit = true; exitPrice = stratTgtP; }
       } else if (strategyId === "m1_rsi_mean_rev") {
         exit = rsi[i] > 50;
       } else if (strategyId === "m1_dual_ema") {
@@ -833,8 +883,6 @@ function backtestStrategy(
         else if (lows[i] <= stopP) { exit = true; exitPrice = stopP; }       // stop hit intraday
         else if (opens[i] >= tgtP) { exit = true; exitPrice = opens[i]; }    // gap above target
         else if (highs[i] >= tgtP) { exit = true; exitPrice = tgtP; }        // target hit intraday
-      } else if (strategyId === "m3_best_overall") {
-        exit = (ema9[i] || 0) < (ema21[i] || 0) || (macd.macdLine[i] || 0) < (macd.signalLine[i] || 0);
       }
 
       if (exit || i === ohlcv.length - 1) {
@@ -897,6 +945,8 @@ function backtestStrategy(
       lastReturnPct: 0,
       liveSignal: signalOnLastBar,
       livePrice: signalOnLastBar ? Math.round(lastP) : null,
+      liveStop: signalOnLastBar ? liveStopOut : null,
+      liveTarget: signalOnLastBar ? liveTargetOut : null,
       tradeLog: [],
       signals
     };
@@ -936,6 +986,10 @@ function backtestStrategy(
     const isStillOpen = lastTrade.exitDate === dates[dates.length - 1];
     if (isRecentEntry && isStillOpen) {
       liveSignal = true;
+      if (overrideExit) {
+        liveStopOut = Math.round(stratStopP * 100) / 100;
+        liveTargetOut = Math.round(stratTgtP * 100) / 100;
+      }
     }
   }
 
@@ -954,6 +1008,8 @@ function backtestStrategy(
     lastReturnPct: parseFloat(lastReturnPct.toFixed(2)),
     liveSignal,
     livePrice: liveSignal ? Math.round(closes[closes.length - 1]) : null,
+    liveStop: liveSignal ? liveStopOut : null,
+    liveTarget: liveSignal ? liveTargetOut : null,
     tradeLog,
     signals
   };
@@ -1407,12 +1463,13 @@ export function computeAllStrategyStats(ohlcv: OHLCV[]): Record<string, Backtest
   const bb = calculateBollingerBands(closes, 20, 2);
   const stochRsi = calculateStochasticRSI(rsi, 14, 3, 3);
   const adx = calculateADX(ohlcv, 14);
+  const atr = calculateATR(ohlcv, 14);
 
   const out: Record<string, BacktestStats> = {};
   for (const strat of STRATEGIES_POOL) {
-    out[strat.id] = backtestStrategy(strat.id, ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx);
+    out[strat.id] = backtestStrategy(strat.id, ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx, atr);
   }
-  out["m2_rounding_bottom"] = backtestStrategy("m2_rounding_bottom", ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx);
+  out["m2_rounding_bottom"] = backtestStrategy("m2_rounding_bottom", ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx, atr);
   out["m4_divergence"] = backtestDivergence(ohlcv, rsi);
   return out;
 }
@@ -1603,6 +1660,8 @@ export async function runScan(
           maxDrawdownPct: bestB1Stats.maxDrawdownPct,
           liveSignal: bestB1Stats.liveSignal,
           livePrice: bestB1Stats.livePrice,
+          liveStop: bestB1Stats.liveStop ?? null,
+          liveTarget: bestB1Stats.liveTarget ?? null,
           isSynthetic: !isReal
         });
         log(`✨ [AI OPTIMIZER PASS] ${stock.symbol} optimized: ${bestB1Strat.label} (PF: ${bestB1Stats.profitFactor}, WR: ${bestB1Stats.winRatePct}%)`);
@@ -1785,6 +1844,8 @@ export async function runScan(
         maxDrawdownPct: b3.maxDrawdownPct,
         liveSignal: b3.liveSignal,
         livePrice: b3.livePrice,
+        liveStop: b3.liveStop ?? null,
+        liveTarget: b3.liveTarget ?? null,
         isSynthetic: !res.isReal
       });
     }

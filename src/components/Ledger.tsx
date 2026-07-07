@@ -126,11 +126,10 @@ export function Ledger({
   const openTakeForm = (r: LedgerRow) => {
     const rowKey = r.symbol + r.strategyId;
     const isM2 = r.strategyId === "m2_rounding_bottom";
-    const isM4 = r.strategyId === "m4_divergence";
 
     if (playbackDate) {
-      if (isM4 && r.livePrice && r.liveStop && r.liveTarget) {
-        // Module 4 practice trade pre-fills based on structure percent limits
+      if (r.livePrice && r.liveStop && r.liveTarget) {
+        // Real backtest-derived levels available (ATR-based, fixed R:R, or m4's structural) — pre-fill from those
         const sPct = Math.max(0.1, ((r.livePrice - r.liveStop) / r.livePrice) * 100);
         const tPct = Math.max(0.1, ((r.liveTarget - r.livePrice) / r.livePrice) * 100);
         setTStopPct(sPct.toFixed(1));
@@ -147,7 +146,7 @@ export function Ledger({
     // LIVE row → prefill from live price
     const base = r.liveSignal && r.livePrice ? r.livePrice : 0;
     setTEntry(base ? String(base) : "");
-    if (isM4 && r.livePrice && r.liveStop && r.liveTarget) {
+    if (r.livePrice && r.liveStop && r.liveTarget) {
       setTStop(String(Math.round(r.liveStop)));
       setTTarget(String(Math.round(r.liveTarget)));
     } else {
@@ -163,9 +162,8 @@ export function Ledger({
     const e = Number(entryStr);
     if (isFinite(e) && e > 0) {
       const isM2 = r.strategyId === "m2_rounding_bottom";
-      const isM4 = r.strategyId === "m4_divergence";
-      if (isM4 && r.livePrice && r.liveStop && r.liveTarget) {
-        // Adjust structural SL/target relative to actual fill entry ratio
+      if (r.livePrice && r.liveStop && r.liveTarget) {
+        // Adjust ATR/structural/fixed-R:R SL/target relative to actual fill entry ratio
         const slip = e / r.livePrice;
         setTStop(String(Math.round(r.liveStop * slip)));
         setTTarget(String(Math.round(r.liveTarget * slip)));
@@ -333,14 +331,14 @@ export function Ledger({
       const entry = r.livePrice;
       const isM2 = r.strategyId === "m2_rounding_bottom";
       const isM4 = r.strategyId === "m4_divergence";
-      
+
       let stop = 0, target = 0, stopPct = 0, targetLabel = "";
 
-      if (isM4 && r.liveStop && r.liveTarget) {
+      if (r.liveStop && r.liveTarget) {
         stop = Math.round(r.liveStop);
         target = Math.round(r.liveTarget);
         stopPct = Math.round(((entry - stop) / entry) * 100);
-        targetLabel = "structural pivot rule";
+        targetLabel = isM4 ? "structural pivot rule" : "backtest-validated exit rule";
       } else {
         stopPct = isM2 ? 5 : 8;
         stop = Math.round(entry * (1 - stopPct / 100));
