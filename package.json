@@ -9,6 +9,7 @@
     "start": "node dist/server.cjs",
     "scan": "tsx scan.ts",
     "scan:demo": "tsx scan.ts",
+    "compare-sl": "tsx compare-sl-cli.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

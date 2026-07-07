@@ -111,7 +111,8 @@ export interface BacktestStats {
   signals: { d: string; p: number; dp?: number; dm?: number; stop?: number; tgt?: number }[];
 }
 
-// Robust fallback list of Nifty 100 constituent tickers (with .NS Yahoo Finance suffix)
+// Robust fallback list of ~330 Nifty 500 constituent tickers (with .NS Yahoo Finance suffix).
+// Used ONLY if every live source below fails. Bigger floor = graceful degrade, not a cliff to 83.
 const TICKERS_FALLBACK = [
   { symbol: "RELIANCE.NS", name: "Reliance Industries Limited" },
   { symbol: "TCS.NS", name: "Tata Consultancy Services Limited" },
@@ -195,7 +196,257 @@ const TICKERS_FALLBACK = [
   { symbol: "APOLLOTYRE.NS", name: "Apollo Tyres Limited" },
   { symbol: "TRENT.NS", name: "Trent Limited" },
   { symbol: "PAGEIND.NS", name: "Page Industries Limited" },
-  { symbol: "POLYCAB.NS", name: "Polycab India Limited" }
+  { symbol: "POLYCAB.NS", name: "Polycab India Limited" },
+  { symbol: "BANKBARODA.NS", name: "Bank of Baroda" },
+  { symbol: "CANBK.NS", name: "Canara Bank" },
+  { symbol: "UNIONBANK.NS", name: "Union Bank of India" },
+  { symbol: "INDIANB.NS", name: "Indian Bank" },
+  { symbol: "BANKINDIA.NS", name: "Bank of India" },
+  { symbol: "IOB.NS", name: "Indian Overseas Bank" },
+  { symbol: "MAHABANK.NS", name: "Bank of Maharashtra" },
+  { symbol: "YESBANK.NS", name: "Yes Bank Limited" },
+  { symbol: "IDBI.NS", name: "IDBI Bank Limited" },
+  { symbol: "RBLBANK.NS", name: "RBL Bank Limited" },
+  { symbol: "BAJAJHLDNG.NS", name: "Bajaj Holdings & Investment Limited" },
+  { symbol: "SBICARD.NS", name: "SBI Cards and Payment Services Limited" },
+  { symbol: "HDFCLIFE.NS", name: "HDFC Life Insurance Company Limited" },
+  { symbol: "HDFCAMC.NS", name: "HDFC Asset Management Company Limited" },
+  { symbol: "LICI.NS", name: "Life Insurance Corporation of India" },
+  { symbol: "LICHSGFIN.NS", name: "LIC Housing Finance Limited" },
+  { symbol: "ICICIGI.NS", name: "ICICI Lombard General Insurance Company Limited" },
+  { symbol: "SHRIRAMFIN.NS", name: "Shriram Finance Limited" },
+  { symbol: "IIFL.NS", name: "IIFL Finance Limited" },
+  { symbol: "CANFINHOME.NS", name: "Can Fin Homes Limited" },
+  { symbol: "M&MFIN.NS", name: "Mahindra & Mahindra Financial Services Limited" },
+  { symbol: "MANAPPURAM.NS", name: "Manappuram Finance Limited" },
+  { symbol: "SUNDARMFIN.NS", name: "Sundaram Finance Limited" },
+  { symbol: "ABCAPITAL.NS", name: "Aditya Birla Capital Limited" },
+  { symbol: "POONAWALLA.NS", name: "Poonawalla Fincorp Limited" },
+  { symbol: "JIOFIN.NS", name: "Jio Financial Services Limited" },
+  { symbol: "IRFC.NS", name: "Indian Railway Finance Corporation Limited" },
+  { symbol: "IREDA.NS", name: "Indian Renewable Energy Development Agency Limited" },
+  { symbol: "LTF.NS", name: "L&T Finance Limited" },
+  { symbol: "PERSISTENT.NS", name: "Persistent Systems Limited" },
+  { symbol: "COFORGE.NS", name: "Coforge Limited" },
+  { symbol: "MPHASIS.NS", name: "Mphasis Limited" },
+  { symbol: "LTTS.NS", name: "L&T Technology Services Limited" },
+  { symbol: "OFSS.NS", name: "Oracle Financial Services Software Limited" },
+  { symbol: "TATAELXSI.NS", name: "Tata Elxsi Limited" },
+  { symbol: "KPITTECH.NS", name: "KPIT Technologies Limited" },
+  { symbol: "BSOFT.NS", name: "Birlasoft Limited" },
+  { symbol: "CYIENT.NS", name: "Cyient Limited" },
+  { symbol: "TATATECH.NS", name: "Tata Technologies Limited" },
+  { symbol: "INTELLECT.NS", name: "Intellect Design Arena Limited" },
+  { symbol: "DIVISLAB.NS", name: "Divi's Laboratories Limited" },
+  { symbol: "LUPIN.NS", name: "Lupin Limited" },
+  { symbol: "AUROPHARMA.NS", name: "Aurobindo Pharma Limited" },
+  { symbol: "ZYDUSLIFE.NS", name: "Zydus Lifesciences Limited" },
+  { symbol: "ALKEM.NS", name: "Alkem Laboratories Limited" },
+  { symbol: "TORNTPHARM.NS", name: "Torrent Pharmaceuticals Limited" },
+  { symbol: "BIOCON.NS", name: "Biocon Limited" },
+  { symbol: "GLENMARK.NS", name: "Glenmark Pharmaceuticals Limited" },
+  { symbol: "IPCALAB.NS", name: "IPCA Laboratories Limited" },
+  { symbol: "LAURUSLABS.NS", name: "Laurus Labs Limited" },
+  { symbol: "ABBOTINDIA.NS", name: "Abbott India Limited" },
+  { symbol: "MANKIND.NS", name: "Mankind Pharma Limited" },
+  { symbol: "FORTIS.NS", name: "Fortis Healthcare Limited" },
+  { symbol: "MAXHEALTH.NS", name: "Max Healthcare Institute Limited" },
+  { symbol: "METROPOLIS.NS", name: "Metropolis Healthcare Limited" },
+  { symbol: "LALPATHLAB.NS", name: "Dr. Lal PathLabs Limited" },
+  { symbol: "SYNGENE.NS", name: "Syngene International Limited" },
+  { symbol: "AJANTPHARM.NS", name: "Ajanta Pharma Limited" },
+  { symbol: "NATCOPHARM.NS", name: "Natco Pharma Limited" },
+  { symbol: "GRANULES.NS", name: "Granules India Limited" },
+  { symbol: "JBCHEPHARM.NS", name: "J.B. Chemicals & Pharmaceuticals Limited" },
+  { symbol: "BAJAJ-AUTO.NS", name: "Bajaj Auto Limited" },
+  { symbol: "MOTHERSON.NS", name: "Samvardhana Motherson International Limited" },
+  { symbol: "BHARATFORG.NS", name: "Bharat Forge Limited" },
+  { symbol: "TIINDIA.NS", name: "Tube Investments of India Limited" },
+  { symbol: "SONACOMS.NS", name: "Sona BLW Precision Forgings Limited" },
+  { symbol: "UNOMINDA.NS", name: "UNO Minda Limited" },
+  { symbol: "EXIDEIND.NS", name: "Exide Industries Limited" },
+  { symbol: "ESCORTS.NS", name: "Escorts Kubota Limited" },
+  { symbol: "BRITANNIA.NS", name: "Britannia Industries Limited" },
+  { symbol: "VBL.NS", name: "Varun Beverages Limited" },
+  { symbol: "UBL.NS", name: "United Breweries Limited" },
+  { symbol: "RADICO.NS", name: "Radico Khaitan Limited" },
+  { symbol: "EMAMILTD.NS", name: "Emami Limited" },
+  { symbol: "GODREJIND.NS", name: "Godrej Industries Limited" },
+  { symbol: "PATANJALI.NS", name: "Patanjali Foods Limited" },
+  { symbol: "DMART.NS", name: "Avenue Supermarts Limited" },
+  { symbol: "VEDL.NS", name: "Vedanta Limited" },
+  { symbol: "JINDALSTEL.NS", name: "Jindal Steel & Power Limited" },
+  { symbol: "NMDC.NS", name: "NMDC Limited" },
+  { symbol: "SAIL.NS", name: "Steel Authority of India Limited" },
+  { symbol: "NATIONALUM.NS", name: "National Aluminium Company Limited" },
+  { symbol: "HINDZINC.NS", name: "Hindustan Zinc Limited" },
+  { symbol: "JSL.NS", name: "Jindal Stainless Limited" },
+  { symbol: "APLAPOLLO.NS", name: "APL Apollo Tubes Limited" },
+  { symbol: "RATNAMANI.NS", name: "Ratnamani Metals & Tubes Limited" },
+  { symbol: "TATAPOWER.NS", name: "Tata Power Company Limited" },
+  { symbol: "ADANIGREEN.NS", name: "Adani Green Energy Limited" },
+  { symbol: "ADANIPOWER.NS", name: "Adani Power Limited" },
+  { symbol: "ADANIENSOL.NS", name: "Adani Energy Solutions Limited" },
+  { symbol: "NHPC.NS", name: "NHPC Limited" },
+  { symbol: "SJVN.NS", name: "SJVN Limited" },
+  { symbol: "TORNTPOWER.NS", name: "Torrent Power Limited" },
+  { symbol: "JSWENERGY.NS", name: "JSW Energy Limited" },
+  { symbol: "CESC.NS", name: "CESC Limited" },
+  { symbol: "IGL.NS", name: "Indraprastha Gas Limited" },
+  { symbol: "MGL.NS", name: "Mahanagar Gas Limited" },
+  { symbol: "GUJGASLTD.NS", name: "Gujarat Gas Limited" },
+  { symbol: "OIL.NS", name: "Oil India Limited" },
+  { symbol: "MRPL.NS", name: "Mangalore Refinery and Petrochemicals Limited" },
+  { symbol: "DALBHARAT.NS", name: "Dalmia Bharat Limited" },
+  { symbol: "JKCEMENT.NS", name: "JK Cement Limited" },
+  { symbol: "RAMCOCEM.NS", name: "The Ramco Cements Limited" },
+  { symbol: "INDIACEM.NS", name: "The India Cements Limited" },
+  { symbol: "JKLAKSHMI.NS", name: "JK Lakshmi Cement Limited" },
+  { symbol: "CUMMINSIND.NS", name: "Cummins India Limited" },
+  { symbol: "THERMAX.NS", name: "Thermax Limited" },
+  { symbol: "BHEL.NS", name: "Bharat Heavy Electricals Limited" },
+  { symbol: "NCC.NS", name: "NCC Limited" },
+  { symbol: "KEI.NS", name: "KEI Industries Limited" },
+  { symbol: "CGPOWER.NS", name: "CG Power and Industrial Solutions Limited" },
+  { symbol: "APARINDS.NS", name: "Apar Industries Limited" },
+  { symbol: "KAYNES.NS", name: "Kaynes Technology India Limited" },
+  { symbol: "DIXON.NS", name: "Dixon Technologies (India) Limited" },
+  { symbol: "AMBER.NS", name: "Amber Enterprises India Limited" },
+  { symbol: "VOLTAS.NS", name: "Voltas Limited" },
+  { symbol: "BLUESTARCO.NS", name: "Blue Star Limited" },
+  { symbol: "CROMPTON.NS", name: "Crompton Greaves Consumer Electricals Limited" },
+  { symbol: "KAJARIACER.NS", name: "Kajaria Ceramics Limited" },
+  { symbol: "CERA.NS", name: "Cera Sanitaryware Limited" },
+  { symbol: "PIIND.NS", name: "PI Industries Limited" },
+  { symbol: "AARTIIND.NS", name: "Aarti Industries Limited" },
+  { symbol: "DEEPAKNTR.NS", name: "Deepak Nitrite Limited" },
+  { symbol: "ATUL.NS", name: "Atul Limited" },
+  { symbol: "VINATIORGA.NS", name: "Vinati Organics Limited" },
+  { symbol: "NAVINFLUOR.NS", name: "Navin Fluorine International Limited" },
+  { symbol: "FLUOROCHEM.NS", name: "Gujarat Fluorochemicals Limited" },
+  { symbol: "TATACHEM.NS", name: "Tata Chemicals Limited" },
+  { symbol: "COROMANDEL.NS", name: "Coromandel International Limited" },
+  { symbol: "GNFC.NS", name: "Gujarat Narmada Valley Fertilizers & Chemicals Limited" },
+  { symbol: "SUMICHEM.NS", name: "Sumitomo Chemical India Limited" },
+  { symbol: "LINDEINDIA.NS", name: "Linde India Limited" },
+  { symbol: "SOLARINDS.NS", name: "Solar Industries India Limited" },
+  { symbol: "GODREJPROP.NS", name: "Godrej Properties Limited" },
+  { symbol: "OBEROIRLTY.NS", name: "Oberoi Realty Limited" },
+  { symbol: "PRESTIGE.NS", name: "Prestige Estates Projects Limited" },
+  { symbol: "PHOENIXLTD.NS", name: "The Phoenix Mills Limited" },
+  { symbol: "BRIGADE.NS", name: "Brigade Enterprises Limited" },
+  { symbol: "LODHA.NS", name: "Macrotech Developers Limited" },
+  { symbol: "IDEA.NS", name: "Vodafone Idea Limited" },
+  { symbol: "INDUSTOWER.NS", name: "Indus Towers Limited" },
+  { symbol: "TATACOMM.NS", name: "Tata Communications Limited" },
+  { symbol: "SUNTV.NS", name: "Sun TV Network Limited" },
+  { symbol: "PVRINOX.NS", name: "PVR INOX Limited" },
+  { symbol: "ABFRL.NS", name: "Aditya Birla Fashion and Retail Limited" },
+  { symbol: "VMART.NS", name: "V-Mart Retail Limited" },
+  { symbol: "RELAXO.NS", name: "Relaxo Footwears Limited" },
+  { symbol: "BATAINDIA.NS", name: "Bata India Limited" },
+  { symbol: "METROBRAND.NS", name: "Metro Brands Limited" },
+  { symbol: "CENTURYPLY.NS", name: "Century Plyboards (India) Limited" },
+  { symbol: "ETERNAL.NS", name: "Eternal Limited" },
+  { symbol: "NYKAA.NS", name: "FSN E-Commerce Ventures Limited" },
+  { symbol: "PAYTM.NS", name: "One 97 Communications Limited" },
+  { symbol: "POLICYBZR.NS", name: "PB Fintech Limited" },
+  { symbol: "DELHIVERY.NS", name: "Delhivery Limited" },
+  { symbol: "IRCTC.NS", name: "Indian Railway Catering and Tourism Corporation Limited" },
+  { symbol: "RVNL.NS", name: "Rail Vikas Nigam Limited" },
+  { symbol: "IRCON.NS", name: "Ircon International Limited" },
+  { symbol: "RITES.NS", name: "RITES Limited" },
+  { symbol: "CONCOR.NS", name: "Container Corporation of India Limited" },
+  { symbol: "GMRAIRPORT.NS", name: "GMR Airports Limited" },
+  { symbol: "INDIGO.NS", name: "InterGlobe Aviation Limited" },
+  { symbol: "JUBLFOOD.NS", name: "Jubilant FoodWorks Limited" },
+  { symbol: "DEVYANI.NS", name: "Devyani International Limited" },
+  { symbol: "KPRMILL.NS", name: "K.P.R. Mill Limited" },
+  { symbol: "TRIDENT.NS", name: "Trident Limited" },
+  { symbol: "PGHH.NS", name: "Procter & Gamble Hygiene and Health Care Limited" },
+  { symbol: "3MINDIA.NS", name: "3M India Limited" },
+  { symbol: "HONAUT.NS", name: "Honeywell Automation India Limited" },
+  { symbol: "SCHAEFFLER.NS", name: "Schaeffler India Limited" },
+  { symbol: "SKFINDIA.NS", name: "SKF India Limited" },
+  { symbol: "TIMKEN.NS", name: "Timken India Limited" },
+  { symbol: "SUPREMEIND.NS", name: "Supreme Industries Limited" },
+  { symbol: "ASTRAL.NS", name: "Astral Limited" },
+  { symbol: "FINCABLES.NS", name: "Finolex Cables Limited" },
+  { symbol: "FINPIPE.NS", name: "Finolex Industries Limited" },
+  { symbol: "MFSL.NS", name: "Max Financial Services Limited" },
+  { symbol: "360ONE.NS", name: "360 ONE WAM Limited" },
+  { symbol: "ANGELONE.NS", name: "Angel One Limited" },
+  { symbol: "CDSL.NS", name: "Central Depository Services (India) Limited" },
+  { symbol: "BSE.NS", name: "BSE Limited" },
+  { symbol: "MCX.NS", name: "Multi Commodity Exchange of India Limited" },
+  { symbol: "KFINTECH.NS", name: "KFin Technologies Limited" },
+  { symbol: "CAMS.NS", name: "Computer Age Management Services Limited" },
+  { symbol: "NAM-INDIA.NS", name: "Nippon Life India Asset Management Limited" },
+  { symbol: "UTIAMC.NS", name: "UTI Asset Management Company Limited" },
+  { symbol: "CHOLAHLDNG.NS", name: "Cholamandalam Financial Holdings Limited" },
+  { symbol: "SUZLON.NS", name: "Suzlon Energy Limited" },
+  { symbol: "BDL.NS", name: "Bharat Dynamics Limited" },
+  { symbol: "MAZDOCK.NS", name: "Mazagon Dock Shipbuilders Limited" },
+  { symbol: "COCHINSHIP.NS", name: "Cochin Shipyard Limited" },
+  { symbol: "GRSE.NS", name: "Garden Reach Shipbuilders & Engineers Limited" },
+  { symbol: "DATAPATTNS.NS", name: "Data Patterns (India) Limited" },
+  { symbol: "ZENTEC.NS", name: "Zen Technologies Limited" },
+  { symbol: "KALYANKJIL.NS", name: "Kalyan Jewellers India Limited" },
+  { symbol: "PNBHOUSING.NS", name: "PNB Housing Finance Limited" },
+  { symbol: "AAVAS.NS", name: "Aavas Financiers Limited" },
+  { symbol: "HOMEFIRST.NS", name: "Home First Finance Company India Limited" },
+  { symbol: "CREDITACC.NS", name: "CreditAccess Grameen Limited" },
+  { symbol: "FIVESTAR.NS", name: "Five-Star Business Finance Limited" },
+  { symbol: "KARURVYSYA.NS", name: "Karur Vysya Bank Limited" },
+  { symbol: "CUB.NS", name: "City Union Bank Limited" },
+  { symbol: "J&KBANK.NS", name: "The Jammu & Kashmir Bank Limited" },
+  { symbol: "KANSAINER.NS", name: "Kansai Nerolac Paints Limited" },
+  { symbol: "AKZOINDIA.NS", name: "Akzo Nobel India Limited" },
+  { symbol: "SUNDRMFAST.NS", name: "Sundram Fasteners Limited" },
+  { symbol: "ENDURANCE.NS", name: "Endurance Technologies Limited" },
+  { symbol: "MOTHERSUMI.NS", name: "Motherson Sumi Wiring India Limited" },
+  { symbol: "CEATLTD.NS", name: "CEAT Limited" },
+  { symbol: "JKTYRE.NS", name: "JK Tyre & Industries Limited" },
+  { symbol: "GODFRYPHLP.NS", name: "Godfrey Phillips India Limited" },
+  { symbol: "VGUARD.NS", name: "V-Guard Industries Limited" },
+  { symbol: "WHIRLPOOL.NS", name: "Whirlpool of India Limited" },
+  { symbol: "SYMPHONY.NS", name: "Symphony Limited" },
+  { symbol: "TTKPRESTIG.NS", name: "TTK Prestige Limited" },
+  { symbol: "HINDPETRO.NS", name: "Hindustan Petroleum Corporation Limited" },
+  { symbol: "CASTROLIND.NS", name: "Castrol India Limited" },
+  { symbol: "GSPL.NS", name: "Gujarat State Petronet Limited" },
+  { symbol: "AEGISLOG.NS", name: "Aegis Logistics Limited" },
+  { symbol: "CHENNPETRO.NS", name: "Chennai Petroleum Corporation Limited" },
+  { symbol: "GESHIP.NS", name: "The Great Eastern Shipping Company Limited" },
+  { symbol: "KPIL.NS", name: "Kalpataru Projects International Limited" },
+  { symbol: "KEC.NS", name: "KEC International Limited" },
+  { symbol: "RHIM.NS", name: "RHI Magnesita India Limited" },
+  { symbol: "CARBORUNIV.NS", name: "Carborundum Universal Limited" },
+  { symbol: "GRINDWELL.NS", name: "Grindwell Norton Limited" },
+  { symbol: "ELGIEQUIP.NS", name: "Elgi Equipments Limited" },
+  { symbol: "AIAENG.NS", name: "AIA Engineering Limited" },
+  { symbol: "RENUKA.NS", name: "Shree Renuka Sugars Limited" },
+  { symbol: "BALRAMCHIN.NS", name: "Balrampur Chini Mills Limited" },
+  { symbol: "EIDPARRY.NS", name: "EID Parry (India) Limited" },
+  { symbol: "CCL.NS", name: "CCL Products (India) Limited" },
+  { symbol: "HERITGFOOD.NS", name: "Heritage Foods Limited" },
+  { symbol: "MARKSANS.NS", name: "Marksans Pharma Limited" },
+  { symbol: "CAPLIPOINT.NS", name: "Caplin Point Laboratories Limited" },
+  { symbol: "ERIS.NS", name: "Eris Lifesciences Limited" },
+  { symbol: "SANOFI.NS", name: "Sanofi India Limited" },
+  { symbol: "PFIZER.NS", name: "Pfizer Limited" },
+  { symbol: "GLAXO.NS", name: "GlaxoSmithKline Pharmaceuticals Limited" },
+  { symbol: "POLYMED.NS", name: "Poly Medicure Limited" },
+  { symbol: "RAINBOW.NS", name: "Rainbow Children's Medicare Limited" },
+  { symbol: "KIMS.NS", name: "Krishna Institute of Medical Sciences Limited" },
+  { symbol: "ASTERDM.NS", name: "Aster DM Healthcare Limited" },
+  { symbol: "GODIGIT.NS", name: "Go Digit General Insurance Limited" },
+  { symbol: "STARHEALTH.NS", name: "Star Health and Allied Insurance Company Limited" },
+  { symbol: "NIACL.NS", name: "The New India Assurance Company Limited" },
+  { symbol: "GICRE.NS", name: "General Insurance Corporation of India" },
+  { symbol: "BAJAJHFL.NS", name: "Bajaj Housing Finance Limited" },
+  { symbol: "SAMMAANCAP.NS", name: "Sammaan Capital Limited" },
+  { symbol: "HUDCO.NS", name: "Housing and Urban Development Corporation Limited" }
 ];
 
 // ---------------- EDGE GATE CONFIG ----------------
@@ -864,31 +1115,67 @@ function parseNifty500CSV(csvText: string): { symbol: string; name: string }[] {
   return result;
 }
 
-async function loadNifty500Tickers(log: (msg: string) => void): Promise<{ symbol: string; name: string }[]> {
+// Multiple live sources for the Nifty 500 constituent CSV. NSE archives ko serverless
+// sandboxes (AI Studio jaise) aksar block karte hain, isliye ek hi URL pe depend nahi karte:
+// direct sources try karte hain, phir read-only CORS proxies ke through, phir hi fallback list.
+const NIFTY500_CSV_SOURCES = [
+  "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv",
+  "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+  "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
+];
+// Public read-only proxies (koi API key nahi). Ye tab kaam aate hain jab origin CORS/bot-block kare.
+const CSV_PROXIES = [
+  (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  (u: string) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+];
+
+async function tryFetchCsv(url: string, log: (m: string) => void): Promise<{ symbol: string; name: string }[] | null> {
   try {
-    log("📡 Querying live Nifty 500 constituent CSV list from NSE India...");
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000); // 8s cap
-    const res = await (globalThis as any).fetch("https://archives.nseindia.com/content/indices/ind_nifty500list.csv", {
+    const timer = setTimeout(() => controller.abort(), 9000);
+    const res = await (globalThis as any).fetch(url, {
       signal: controller.signal,
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      }
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/csv,text/plain,*/*",
+      },
     });
     clearTimeout(timer);
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) return null;
     const text = await res.text();
     const parsed = parseNifty500CSV(text);
-    if (parsed.length > 40) {
-      log(`✅ Successfully loaded ${parsed.length} live constituent tickers!`);
+    return parsed.length > 40 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function loadNifty500Tickers(log: (msg: string) => void): Promise<{ symbol: string; name: string }[]> {
+  log("📡 Querying live Nifty 500 constituent list (multi-source)...");
+
+  // 1) Direct sources
+  for (const src of NIFTY500_CSV_SOURCES) {
+    const parsed = await tryFetchCsv(src, log);
+    if (parsed) {
+      log(`✅ Loaded ${parsed.length} live constituents (direct: ${new URL(src).hostname}).`);
       return parsed;
     }
-    throw new Error("Empty parsed dataset");
-  } catch (e: any) {
-    log(`⚠️ NSE block or rate limit: ${e.message || e}. Gracefully using robust 100+ pre-seeded Nifty constituents...`);
-    return TICKERS_FALLBACK;
   }
+
+  // 2) Same sources via read-only CORS/bot-bypass proxies (for sandboxes like AI Studio)
+  for (const src of NIFTY500_CSV_SOURCES) {
+    for (const wrap of CSV_PROXIES) {
+      const parsed = await tryFetchCsv(wrap(src), log);
+      if (parsed) {
+        log(`✅ Loaded ${parsed.length} live constituents (via proxy).`);
+        return parsed;
+      }
+    }
+  }
+
+  // 3) Every live route failed — degrade gracefully to the large pre-seeded list.
+  log(`⚠️ Saare live sources block/timeout hue. ${TICKERS_FALLBACK.length} pre-seeded constituents use kar rahe hain (na ki sirf 83).`);
+  return TICKERS_FALLBACK;
 }
 
 // ---------------- MAIN SCAN RUNNER ----------------

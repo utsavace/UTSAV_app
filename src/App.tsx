@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo, useRef } from "react";
 import { Ledger, type LedgerRow } from "./components/Ledger.tsx";
 import { MyTrades } from "./components/MyTrades.tsx";
 import { DivergenceChart } from "./components/DivergenceChart.tsx";
+import { ExitSchemeComparison } from "./components/ExitSchemeComparison.tsx";
 
 interface Meta {
   needsScan?: boolean;
@@ -41,6 +42,7 @@ const TABS = [
   { n: 3, key: "best", label: "Best Overall Edge" },
   { n: 4, key: "div", label: "Divergence Scanner" },
   { n: 5, key: "journal", label: "My Trades" },
+  { n: 6, key: "compare_sl", label: "Exit Scheme Comparison" },
 ] as const;
 
 const DESC: Record<number, string> = {
@@ -49,6 +51,7 @@ const DESC: Record<number, string> = {
   3: "Identifies the single high-probability technical strategy that registers the greatest number of breadth passes across the entire Nifty 500 universe to maximize robustness.",
   4: "Detects RSI (14) bullish divergences (price lower-low, RSI higher-low from oversold) on daily candles. Triggers entries on pivot confirmation with structure-based stop-losses and 2R targets, viewable via stacked visual chart panels.",
   5: "Your personal trade journal — tick a trade you're taking, and it auto-tracks whether the stop-loss or target gets hit on real daily data, then helps you review and learn from every outcome.",
+  6: "Compares 7 distinct stop-loss & target exit schemes (including the current '8% flat SL') on same-entry points across the universe to locate the absolute data-backed mathematical edge.",
 };
 
 export default function App() {
@@ -312,7 +315,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (tab === 5) { setRows([]); setLoading(false); return; } // journal tab has no module cache
+    if (tab === 5 || tab === 6) { setRows([]); setLoading(false); return; } // journal/compare tabs have no standard module cache
     setLoading(true);
     fetchModule(tab)
       .then(setRows)
@@ -756,6 +759,8 @@ export default function App() {
             asOfDate={pbOn ? (pbDate || undefined) : undefined}
             onCountChange={pbOn ? setPbJournalCount : setJournalCount}
           />
+        ) : tab === 6 ? (
+          <ExitSchemeComparison />
         ) : pbOn && !pbSnap ? (
           <div className="state">
             <div className="spinner" />

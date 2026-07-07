@@ -3,7 +3,8 @@ import path from "path";
 import fs from "fs";
 import { exec } from "child_process";
 import dotenv from "dotenv";
-import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences } from "./scan.ts";
+import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, loadNifty500Tickers } from "./scan.ts";
+import { runCompareSl } from "./compareSlEngine.ts";
 
 // Load env for GEMINI_API_KEY (README uses .env.local; AI Studio injects at runtime)
 dotenv.config({ path: ".env.local" });
@@ -886,6 +887,74 @@ app.get("/api/divergence/chart", (req, res) => {
   } catch (e: any) {
     res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
+});
+
+// ============================================================================
+// /api/compare-sl — SL/target exit-scheme comparison (dashboard-safe, read-only).
+// Poore live universe (ya ?limit=N) pe M1+M3 same entries, 7 exit schemes test
+// karta hai. Background job (500 stocks me time lagta hai) — is route se sirf
+// START/STATUS milta hai, result /api/compare-sl/result se poll karo.
+//   GET /api/compare-sl/start?limit=500   -> { ok, started }
+//   GET /api/compare-sl/status            -> { running, done, total, currentSymbol }
+//   GET /api/compare-sl/result            -> { ok, ...CompareResult } (jab tak nahi bana: { ok:false, pending:true })
+// ============================================================================
+let compareSlJob: {
+  running: boolean;
+  done: number;
+  total: number;
+  currentSymbol: string;
+  startedAt: number;
+  result: any | null;
+  error: string | null;
+} = { running: false, done: 0, total: 0, currentSymbol: "", startedAt: 0, result: null, error: null };
+
+app.get("/api/compare-sl/start", async (req, res) => {
+  if (compareSlJob.running) {
+    return res.json({ ok: true, started: false, alreadyRunning: true });
+  }
+  const limitRaw = String(req.query.limit || "");
+  const limit = /^\d+$/.test(limitRaw) ? Number(limitRaw) : null;
+
+  compareSlJob = { running: true, done: 0, total: 0, currentSymbol: "", startedAt: Date.now(), result: null, error: null };
+  res.json({ ok: true, started: true });
+
+  // Background — response already sent above, this continues after.
+  (async () => {
+    try {
+      const log = (_m: string) => {}; // loadNifty500Tickers wants a logger; we don't need console noise here
+      let universe = await loadNifty500Tickers(log);
+      if (limit && limit > 0) universe = universe.slice(0, limit);
+      compareSlJob.total = universe.length;
+      const result = await runCompareSl(universe, (done, total, sym) => {
+        compareSlJob.done = done;
+        compareSlJob.total = total;
+        compareSlJob.currentSymbol = sym;
+      });
+      compareSlJob.result = result;
+    } catch (e: any) {
+      compareSlJob.error = e?.message || String(e);
+    } finally {
+      compareSlJob.running = false;
+    }
+  })();
+});
+
+app.get("/api/compare-sl/status", (_req, res) => {
+  res.json({
+    running: compareSlJob.running,
+    done: compareSlJob.done,
+    total: compareSlJob.total,
+    currentSymbol: compareSlJob.currentSymbol,
+    elapsedSec: compareSlJob.startedAt ? +((Date.now() - compareSlJob.startedAt) / 1000).toFixed(1) : 0,
+    hasResult: !!compareSlJob.result,
+    error: compareSlJob.error,
+  });
+});
+
+app.get("/api/compare-sl/result", (_req, res) => {
+  if (compareSlJob.error) return res.json({ ok: false, error: compareSlJob.error });
+  if (!compareSlJob.result) return res.json({ ok: false, pending: true, running: compareSlJob.running, done: compareSlJob.done, total: compareSlJob.total });
+  res.json(compareSlJob.result);
 });
 
 start();
