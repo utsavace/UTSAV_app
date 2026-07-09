@@ -215,7 +215,11 @@ export default function App() {
   useEffect(() => {
     if (showPnl && allTradesData === null) {
       fetch(`/cache/alltrades.json?t=${Date.now()}`)
-        .then((r) => (r.ok ? r.json() : []))
+        .then((r) => {
+          const isJson = r.headers.get("content-type")?.includes("application/json");
+          if (!r.ok || !isJson) throw new Error("not json");
+          return r.json();
+        })
         .then(setAllTradesData)
         .catch(() => setAllTradesData([]));
     }
@@ -294,19 +298,35 @@ export default function App() {
 
   const fetchMeta = (): Promise<Meta> =>
     fetch(`/api/meta?t=${Date.now()}`)
-      .then((r) => { if (!r.ok) throw new Error("api down"); return r.json(); })
+      .then((r) => {
+        const isJson = r.headers.get("content-type")?.includes("application/json");
+        if (!r.ok || !isJson) throw new Error("api down");
+        return r.json();
+      })
       .catch(() =>
         fetch(`/cache/meta.json?t=${Date.now()}`)
-          .then((r) => { if (!r.ok) throw new Error("no cache"); return r.json(); })
+          .then((r) => {
+            const isJson = r.headers.get("content-type")?.includes("application/json");
+            if (!r.ok || !isJson) throw new Error("no cache");
+            return r.json();
+          })
       );
 
   const fetchModule = (n: number): Promise<LedgerRow[]> =>
     fetch(`/api/module/${n}?t=${Date.now()}`)
-      .then((r) => { if (!r.ok) throw new Error("api down"); return r.json(); })
+      .then((r) => {
+        const isJson = r.headers.get("content-type")?.includes("application/json");
+        if (!r.ok || !isJson) throw new Error("api down");
+        return r.json();
+      })
       .then((d) => (Array.isArray(d) ? d : Array.isArray(d.rows) ? d.rows : []))
       .catch(() =>
         fetch(`/cache/module${n}.json?t=${Date.now()}`)
-          .then((r) => { if (!r.ok) throw new Error("no cache"); return r.json(); })
+          .then((r) => {
+            const isJson = r.headers.get("content-type")?.includes("application/json");
+            if (!r.ok || !isJson) throw new Error("no cache");
+            return r.json();
+          })
           .then((d) => (Array.isArray(d) ? d : []))
       );
 
@@ -459,6 +479,19 @@ export default function App() {
           )}
           {import.meta.env.DEV && publishMsg && (
             <span className="text-xs text-[#8e9ba9] font-mono max-w-[260px] truncate" title={publishMsg}>{publishMsg}</span>
+          )}
+          {!pbOn && (
+            <button
+              type="button"
+              className="flex items-center gap-2 bg-[#151b27] border border-[#10b981]/50 text-[#22c55e] font-bold px-4 py-2.5 rounded-lg text-sm transition-all hover:bg-[#1b2230] cursor-pointer active:scale-[0.97] disabled:opacity-50"
+              onClick={startScanning}
+              disabled={scanStatus.isScanning}
+              title="Turant naya scan chalao — 500 stocks ka latest data fetch karke cache refresh karega (~25-30s lagega)"
+            >
+              {scanStatus.isScanning
+                ? `⏳ Scanning… ${scanStatus.scanned}/500`
+                : "🔄 Refresh Now"}
+            </button>
           )}
           {!pbOn ? (
             <button

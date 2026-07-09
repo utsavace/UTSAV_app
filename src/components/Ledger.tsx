@@ -103,7 +103,8 @@ export function Ledger({
       setLoadingKey(key);
       try {
         const res = await fetch(`/cache/trades/${encodeURIComponent(key)}.json`);
-        const data = res.ok ? await res.json() : [];
+        const isJson = res.headers.get("content-type")?.includes("application/json");
+        const data = (res.ok && isJson) ? await res.json() : [];
         setTradesCache((prev) => ({ ...prev, [key]: Array.isArray(data) ? data : [] }));
       } catch {
         setTradesCache((prev) => ({ ...prev, [key]: [] }));
