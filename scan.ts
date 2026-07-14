@@ -1252,8 +1252,46 @@ export const PIVOT_K = 3;        // pivot = extreme among ±3 bars
 const DIV_MIN_GAP = 5;           // pivots kam se kam 5 sessions door
 const DIV_MAX_GAP = 60;          // aur zyada se zyada ~3 mahine
 const DIV_RSI_DELTA = 2;         // RSI mein kam se kam 2-point ka clear fark
-const DIV_MAX_RISK_PCT = 8;      // structure-SL entry se 8%+ door ho toh trade skip (quality filter)
-const DIV_RR = 2;                // target = entry + 2 × risk (2R)
+// ── EXIT RULE (validated on 500 stocks × 5y, in-sample/out-of-sample split) ──
+// Purana rule (SL = divergence-low − 1%, target = 2R) OUT-OF-SAMPLE paisa khota
+// tha: OOS PF 0.93, expectancy −0.24%. ATR-based exits us se kaafi behtar nikle:
+// OOS PF 1.79, expectancy +5.08%. Isliye ab ATR SL/target use hota hai.
+// NOTE: purana DIV_MAX_RISK_PCT (8%) yahan JAAN-BOOJH KE hata diya — weekly ATR
+// risk aksar 8% se zyada hota hai, wo cap lagane se saare trades filter ho jaate.
+const DIV_ATR_SL_MULT = 2.5;     // stop-loss  = entry − 2.5 × ATR(14)
+const DIV_ATR_TP_MULT = 5.0;     // target     = entry + 5.0 × ATR(14)
+
+// ── TIMEFRAME: WEEKLY ────────────────────────────────────────────────────────
+// Divergence ka edge weekly candles pe hai, daily pe nahi. Same detection, same
+// data pe: DAILY best PF ~1.05 (basically flat), WEEKLY PF 2.35 / OOS 1.79.
+// Isliye m4 ab daily bars ko weekly me resample karke chalta hai. Baaki modules
+// (m1/m2/m3) daily hi rehte hain — un pe koi asar nahi.
+export function toWeekly(daily: OHLCV[]): OHLCV[] {
+  const out: OHLCV[] = [];
+  let cur: OHLCV | null = null;
+  let curWeek = "";
+  for (const b of daily) {
+    const dt = new Date(b.date + "T00:00:00Z");
+    if (isNaN(dt.getTime())) continue;
+    // Monday-anchored week key
+    const mon = new Date(dt);
+    mon.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7));
+    const wk = mon.toISOString().slice(0, 10);
+    if (wk !== curWeek) {
+      if (cur) out.push(cur);
+      cur = { date: b.date, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume };
+      curWeek = wk;
+    } else if (cur) {
+      cur.high = Math.max(cur.high, b.high);
+      cur.low = Math.min(cur.low, b.low);
+      cur.close = b.close;
+      cur.date = b.date;              // week ka aakhri trading din
+      cur.volume += b.volume;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
 
 export interface DivergenceEvent {
   type: "bullish" | "bearish";
@@ -1316,15 +1354,22 @@ export function detectDivergences(dates: string[], highs: number[], lows: number
   return events;
 }
 
-// Dedicated backtest: entry NEXT OPEN after bullish confirm; SL = 1% below the
-// divergence low (structure), target = entry + 2R; exits gap-aware intraday;
-// bearish-divergence confirm while long = protective exit at close.
-export function backtestDivergence(ohlcv: OHLCV[], rsi: number[]): BacktestStats {
+// Dedicated backtest — runs on WEEKLY candles (daily bars internally resampled).
+// Entry: NEXT week's open after a bullish divergence confirms (no look-ahead —
+// a pivot only exists PIVOT_K bars after the fact, so we trade the confirm bar).
+// Exit: 2.5x ATR stop / 5x ATR target (gap-aware intraweek), or a bearish
+// divergence confirm while long = protective exit at that week's close.
+// LONG-only: shorts were tested on 500 stocks × 5y and were clearly negative
+// (PF 0.86 weekly), so bearish divergence is used ONLY as an exit signal.
+export function backtestDivergence(dailyOhlcv: OHLCV[]): BacktestStats {
+  const ohlcv = toWeekly(dailyOhlcv);
   const dates = ohlcv.map(d => d.date);
   const opens = ohlcv.map(d => d.open);
   const highs = ohlcv.map(d => d.high);
   const lows = ohlcv.map(d => d.low);
   const closes = ohlcv.map(d => d.close);
+  const rsi = calculateRSI(closes, 14);
+  const atr = calculateATR(ohlcv, 14);
   const events = detectDivergences(dates, highs, lows, rsi);
 
   const bullAt: Record<number, DivergenceEvent> = {};
@@ -1339,7 +1384,7 @@ export function backtestDivergence(ohlcv: OHLCV[], rsi: number[]): BacktestStats
   const signals: BacktestStats["signals"] = [];
   let inPosition = false, entryPrice = 0, entryDate = "";
   let stopP = 0, tgtP = 0;
-  let pendingEntry = false, pendingStop = 0, pendingTgt = 0;
+  let pendingEntry = false, pendingAtr = 0;
   let signalOnLastBar = false;
   let liveStop: number | null = null, liveTarget: number | null = null;
   let lastTradeEntry: number | null = null, lastTradeExit: number | null = null, lastTradeReturn: number | null = null;
@@ -1365,20 +1410,20 @@ export function backtestDivergence(ohlcv: OHLCV[], rsi: number[]): BacktestStats
         inPosition = true;
         entryPrice = opens[i];
         entryDate = dates[i];
-        // Levels signal ke structure se bane the (pivot low pe), entry-price pe 2R recompute:
-        stopP = pendingStop;
-        const risk = entryPrice - stopP;
-        tgtP = risk > 0 ? entryPrice + DIV_RR * risk : pendingTgt;
+        // ATR levels signal-bar ke ATR se bane the; entry price pe re-anchor:
+        const a = pendingAtr > 0 ? pendingAtr : entryPrice * 0.02;
+        stopP = entryPrice - DIV_ATR_SL_MULT * a;
+        tgtP = entryPrice + DIV_ATR_TP_MULT * a;
         pendingEntry = false;
         continue;
       }
       const ev = bullAt[i];
       if (ev) {
         const price = closes[i];
-        const stop = ev.p2.price * 0.99; // divergence low se 1% neeche
-        const riskPct = ((price - stop) / price) * 100;
-        if (riskPct > 0.2 && riskPct <= DIV_MAX_RISK_PCT) { // quality filter: too-tight ya too-wide dono skip
-          const tgt = price + DIV_RR * (price - stop);
+        const a = atr[i] > 0 ? atr[i] : price * 0.02;
+        const stop = price - DIV_ATR_SL_MULT * a;
+        const tgt = price + DIV_ATR_TP_MULT * a;
+        if (stop > 0) {
           signals.push({ d: dates[i], p: Math.round(price * 100) / 100, stop: Math.round(stop * 100) / 100, tgt: Math.round(tgt * 100) / 100 });
           if (i === ohlcv.length - 1) {
             signalOnLastBar = true;
@@ -1386,8 +1431,7 @@ export function backtestDivergence(ohlcv: OHLCV[], rsi: number[]): BacktestStats
             liveTarget = Math.round(tgt * 100) / 100;
           } else {
             pendingEntry = true;
-            pendingStop = stop;
-            pendingTgt = tgt;
+            pendingAtr = a;
           }
         }
       }
@@ -1470,7 +1514,7 @@ export function computeAllStrategyStats(ohlcv: OHLCV[]): Record<string, Backtest
     out[strat.id] = backtestStrategy(strat.id, ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx, atr);
   }
   out["m2_rounding_bottom"] = backtestStrategy("m2_rounding_bottom", ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx, atr);
-  out["m4_divergence"] = backtestDivergence(ohlcv, rsi);
+  out["m4_divergence"] = backtestDivergence(ohlcv); // resamples to weekly internally
   return out;
 }
 
@@ -1729,9 +1773,9 @@ export async function runScan(
           name: stock.name,
           strategyId: "m4_divergence",
           trades: b4.tradeLog,
-          strategyLabel: "RSI Divergence",
-          entryCond: "Bullish RSI divergence (price lower-low, RSI higher-low from oversold), entry next open after pivot confirms",
-          exitCond: "SL 1% below divergence low, target 2R, ya bearish divergence confirm hone pe exit",
+          strategyLabel: "RSI Divergence (Weekly)",
+          entryCond: "WEEKLY bullish RSI divergence (price lower-low, RSI higher-low from oversold), entry next week's open after pivot confirms",
+          exitCond: "SL 2.5x ATR, target 5x ATR (weekly), ya bearish divergence confirm hone pe exit",
           lastEntryPrice: b4.lastEntryPrice,
           lastExitPrice: b4.lastExitPrice,
           lastReturnPct: b4.lastReturnPct,

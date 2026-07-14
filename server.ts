@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import { exec } from "child_process";
 import dotenv from "dotenv";
-import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, loadNifty500Tickers } from "./scan.ts";
+import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, toWeekly, loadNifty500Tickers } from "./scan.ts";
 import { runCompareSl } from "./compareSlEngine.ts";
 
 // Load env for GEMINI_API_KEY (README uses .env.local; AI Studio injects at runtime)
@@ -52,6 +52,65 @@ let scanStatus: ScanStatus = {
   passedCount: 0,
   logs: []
 };
+
+// ============================================================================
+// AUTO-REFRESH SCHEDULER (production only)
+// ----------------------------------------------------------------------------
+// Without this, the dashboard shows whatever "Data generated at" timestamp the
+// LAST scan produced — forever, until someone manually clicks "Fetch Fresh Data".
+// This runs runScan() automatically every 2 hours during NSE market hours (IST),
+// directly on the live Render instance (no git push needed — it just refreshes
+// this running server's own public/cache files, same as the manual button does).
+// Disabled outside production so it never fires inside the AI Studio dev sandbox.
+// ============================================================================
+const AUTO_SCAN_INTERVAL_MS = 2 * 60 * 60 * 1000; // every 2 hours
+
+function nowIST(): Date {
+  // Shift current UTC time by +5:30 so getUTC* reads back as IST wall-clock time,
+  // regardless of what timezone the server OS itself is running in.
+  return new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+}
+
+function isAutoScanWindowIST(d: Date): boolean {
+  const day = d.getUTCDay(); // 0 = Sun, 6 = Sat (NSE closed)
+  if (day === 0 || day === 6) return false;
+  const mins = d.getUTCHours() * 60 + d.getUTCMinutes();
+  const MARKET_OPEN = 9 * 60 + 15;   // 9:15 AM IST
+  const REFRESH_CUTOFF = 16 * 60;    // 4:00 PM IST (one extra pass after the 3:30 close to pick up final EOD candles)
+  return mins >= MARKET_OPEN && mins <= REFRESH_CUTOFF;
+}
+
+function scheduleAutoScan() {
+  if (process.env.NODE_ENV !== "production") return; // AI Studio dev sandbox: manual button only
+  setInterval(() => {
+    if (scanStatus.isScanning) return; // never overlap with an in-progress scan
+    if (!isAutoScanWindowIST(nowIST())) return;
+
+    scanStatus = {
+      isScanning: true,
+      progress: 0,
+      scanned: 0,
+      currentSymbol: "Scheduled auto-refresh starting...",
+      passedCount: 0,
+      logs: [`⏱ Auto-refresh triggered at ${new Date().toISOString()}`]
+    };
+    runScan((progress, scanned, currentSymbol, passedCount, logLine) => {
+      scanStatus.progress = progress;
+      scanStatus.scanned = scanned;
+      scanStatus.currentSymbol = currentSymbol;
+      scanStatus.passedCount = passedCount;
+      scanStatus.logs.push(logLine);
+      if (scanStatus.logs.length > 80) scanStatus.logs.shift();
+    }).then(() => {
+      scanStatus.isScanning = false;
+      scanStatus.progress = 100;
+      scanStatus.logs.push("🎉 Scheduled auto-refresh complete — cache updated.");
+    }).catch((err) => {
+      scanStatus.isScanning = false;
+      scanStatus.logs.push(`❌ Auto-refresh failed: ${err?.message || err}`);
+    });
+  }, AUTO_SCAN_INTERVAL_MS);
+}
 
 function readCache(name: string) {
   const p = path.join(CACHE, name);
@@ -735,6 +794,7 @@ async function start() {
   }
   
   app.listen(PORT, "0.0.0.0", () => console.log(`Edge console → http://localhost:${PORT}`));
+  scheduleAutoScan();
 }
 
 
@@ -848,16 +908,19 @@ app.get("/api/divergence/chart", (req, res) => {
       end = raw.d.findIndex((d: string) => d > asOf);
       if (end === -1) end = raw.d.length;
     }
-    const ohlcv = raw.d.slice(0, end).map((d: string, i: number) => ({ date: d, open: raw.o[i], high: raw.h[i], low: raw.l[i], close: raw.c[i], volume: raw.v?.[i] ?? 0 }));
+    const daily = raw.d.slice(0, end).map((d: string, i: number) => ({ date: d, open: raw.o[i], high: raw.h[i], low: raw.l[i], close: raw.c[i], volume: raw.v?.[i] ?? 0 }));
+    // m4 WEEKLY pe chalta hai — chart bhi weekly dikhna chahiye, warna pivots/events
+    // backtest se match nahi karenge.
+    const ohlcv = toWeekly(daily);
     if (ohlcv.length < 60) return res.status(400).json({ ok: false, error: "Chart ke liye data kam hai" });
 
     const closes = ohlcv.map((c: any) => c.close);
     const rsi = calculateRSI(closes, 14);
     const events = detectDivergences(ohlcv.map((c: any) => c.date), ohlcv.map((c: any) => c.high), ohlcv.map((c: any) => c.low), rsi);
 
-    // Window: last 400 bars, par kam se kam latest divergence pura dikhe
+    // Window: last 200 WEEKLY bars (~4 saal), par kam se kam latest divergence pura dikhe
     const N = ohlcv.length;
-    let startIdx = Math.max(0, N - 400);
+    let startIdx = Math.max(0, N - 200);
     const lastEv = events[events.length - 1];
     if (lastEv && lastEv.p1.i < startIdx) startIdx = Math.max(0, lastEv.p1.i - 10);
     const win = (i: number) => i - startIdx;
