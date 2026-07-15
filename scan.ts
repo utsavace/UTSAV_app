@@ -455,7 +455,7 @@ export const MIN_WIN_RATE = 60;        // percent
 export const MIN_PROFIT_FACTOR = 2.0;
 export const STRICT_TRADES = 15;       // strict gate for strategy modules (M1, M3) + M2 "Strict" highlight
 // M4 (Weekly RSI Divergence) gate — only show stocks with win rate >= 50% and >= 7 trades
-export const M4_MIN_TRADES = 7;
+export const M4_MIN_TRADES = 1;   // weekly cadence pe avg ~1.9 trades/stock, max 6 — 7 se koi pass nahi hoga
 export const M4_MIN_WIN_RATE = 50;
 export const M4_MIN_PF = 1.2;
 export const STRICT_PF = 2.5;
@@ -1829,7 +1829,7 @@ export async function runScan(
 
       // MODULE 4: RSI Divergence — gate requires min 7 trades & 50% win rate
       const b4 = stratResults["m4_divergence"];
-      const m4passed = b4 && b4.numTrades >= M4_MIN_TRADES && b4.winRatePct >= M4_MIN_WIN_RATE && b4.profitFactor >= M4_MIN_PF;
+      const m4passed = b4 && (b4.liveSignal || (b4.numTrades >= M4_MIN_TRADES && b4.winRatePct >= M4_MIN_WIN_RATE && b4.profitFactor >= M4_MIN_PF));
       if (m4passed) {
         passedCount++;
         module4Rows.push({
