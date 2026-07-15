@@ -916,7 +916,7 @@ app.get("/api/divergence/chart", (req, res) => {
 
     const closes = ohlcv.map((c: any) => c.close);
     const rsi = calculateRSI(closes, 14);
-    const events = detectDivergences(ohlcv.map((c: any) => c.date), ohlcv.map((c: any) => c.high), ohlcv.map((c: any) => c.low), rsi);
+    const events = detectDivergences(ohlcv.map((c: any) => c.date), ohlcv.map((c: any) => c.high), ohlcv.map((c: any) => c.low), rsi, ohlcv);
 
     // Window: last 200 WEEKLY bars (~4 saal), par kam se kam latest divergence pura dikhe
     const N = ohlcv.length;
