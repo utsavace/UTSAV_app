@@ -149,6 +149,7 @@ function validateCache(): { valid: boolean; reason?: string } {
     const rows = readCache(`module${n}.json`);
     if (rows === null) return { valid: false, reason: `module${n} missing` };
     for (const r of rows) {
+      if (r.liveSignal) continue; // Skip gate check for active live setups
       if (r.numTrades < minT)
         return { valid: false, reason: `m${n} ${r.symbol}: ${r.numTrades} trades < gate ${minT}` };
       if (r.winRatePct < minWRCheck - 0.01)
