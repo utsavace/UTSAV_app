@@ -64,6 +64,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [liveOnly, setLiveOnly] = useState(false);
   const [m2Strict, setM2Strict] = useState(true); // M2: highlight rows meeting strict 15/2.5 (default ON)
+  const [m4MinTrades, setM4MinTrades] = useState(7);   // M4 filter: min completed trades
+  const [m4MinWinRate, setM4MinWinRate] = useState(60); // M4 filter: min win rate %
   const [historyStart, setHistoryStart] = useState(() => {
     const d = new Date();
     d.setFullYear(d.getFullYear() - 5); // default: last 5 years; pick any older date to go further back
@@ -413,6 +415,13 @@ export default function App() {
     if (liveOnly) {
       result = result.filter((r) => r.liveSignal);
     }
+    // M4 tab: apply user-selected min trades + win rate filter
+    if (tab === 4) {
+      result = result.filter((r) =>
+        r.liveSignal || // live signals always show regardless of history
+        (r.numTrades >= m4MinTrades && r.winRatePct >= m4MinWinRate)
+      );
+    }
     if (sortField) {
       result.sort((a, b) => {
         const valA = a[sortField];
@@ -433,7 +442,7 @@ export default function App() {
       });
     }
     return result;
-  }, [rows, searchQuery, liveOnly, sortField, sortAsc, pbOn, pbSnap, tab]);
+  }, [rows, searchQuery, liveOnly, sortField, sortAsc, pbOn, pbSnap, tab, m4MinTrades, m4MinWinRate]);
 
   const g = meta?.gate;
   const needsScan = meta?.needsScan && !pbOn; // playback has its own data source
@@ -728,6 +737,42 @@ export default function App() {
                     <span className="toggle-dot" />
                     Strict (15 / PF 2.5)
                   </button>
+                )}
+                {tab === 4 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <span style={{ color: "#8e9ba9", fontSize: "12px", fontFamily: "monospace" }}>Min Trades</span>
+                      <select
+                        value={m4MinTrades}
+                        onChange={(e) => setM4MinTrades(Number(e.target.value))}
+                        style={{ background: "#0f141c", border: "1px solid #212836", color: "#e6edf5", borderRadius: "6px", padding: "4px 8px", fontFamily: "monospace", fontSize: "12px", cursor: "pointer" }}
+                      >
+                        {[7, 8, 9, 10, 11, 12, 15].map(v => (
+                          <option key={v} value={v}>{v}+</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <span style={{ color: "#8e9ba9", fontSize: "12px", fontFamily: "monospace" }}>Min Win%</span>
+                      <select
+                        value={m4MinWinRate}
+                        onChange={(e) => setM4MinWinRate(Number(e.target.value))}
+                        style={{ background: "#0f141c", border: "1px solid #212836", color: "#e6edf5", borderRadius: "6px", padding: "4px 8px", fontFamily: "monospace", fontSize: "12px", cursor: "pointer" }}
+                      >
+                        {[60, 70, 80, 90, 100].map(v => (
+                          <option key={v} value={v}>{v}%+</option>
+                        ))}
+                      </select>
+                    </div>
+                    {(m4MinTrades !== 7 || m4MinWinRate !== 60) && (
+                      <button
+                        onClick={() => { setM4MinTrades(7); setM4MinWinRate(60); }}
+                        style={{ background: "transparent", border: "1px solid #2a3342", color: "#8e9ba9", borderRadius: "6px", padding: "4px 10px", fontSize: "11px", fontFamily: "monospace", cursor: "pointer" }}
+                      >
+                        Reset
+                      </button>
+                    )}
+                  </div>
                 )}
                 <div className="history-date-box" style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#8e9ba9" }}>
                   <span>Signals since</span>

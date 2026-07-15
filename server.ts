@@ -142,9 +142,9 @@ function validateCache(): { valid: boolean; reason?: string } {
 
   for (const n of ["1", "2", "3", "4"]) {
     const isStrictModule = n !== "2" && n !== "4"; // M2 aur M4 base gate pe chalte hain
-    const minT = n === "4" ? 1 : isStrictModule ? strictT : baseT;        // M4: 1 trade min (weekly cadence, avg ~1.9/stock)
-    const minPF = n === "4" ? 1.2 : isStrictModule ? strictPF : basePF;   // M4: 1.2 PF min
-    const minWRCheck = n === "4" ? 50 : minWR;                            // M4: 50% win rate min
+    const minT = n === "4" ? 7 : isStrictModule ? strictT : baseT;
+    const minPF = n === "4" ? 1.2 : isStrictModule ? strictPF : basePF;
+    const minWRCheck = n === "4" ? 60 : minWR;
 
     const rows = readCache(`module${n}.json`);
     if (rows === null) return { valid: false, reason: `module${n} missing` };

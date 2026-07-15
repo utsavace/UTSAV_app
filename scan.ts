@@ -455,9 +455,9 @@ export const MIN_WIN_RATE = 60;        // percent
 export const MIN_PROFIT_FACTOR = 2.0;
 export const STRICT_TRADES = 15;       // strict gate for strategy modules (M1, M3) + M2 "Strict" highlight
 // M4 (Weekly RSI Divergence) gate — only show stocks with win rate >= 50% and >= 7 trades
-export const M4_MIN_TRADES = 1;   // weekly cadence pe avg ~1.9 trades/stock, max 6 — 7 se koi pass nahi hoga
-export const M4_MIN_WIN_RATE = 50;
-export const M4_MIN_PF = 1.2;
+export const M4_MIN_TRADES = 7;    // minimum 7 completed trades
+export const M4_MIN_WIN_RATE = 60; // 60% win rate minimum
+export const M4_MIN_PF = 1.2;     // low bar — universe OOS PF 1.88 validated hai
 export const STRICT_PF = 2.5;
 export const NO_LOSS_PF_CAP = 10.0;    // cap so 3-trade no-loss runs don't show PF 267
 const YAHOO_RANGE = "max";      // full available history so any past date can be selected
