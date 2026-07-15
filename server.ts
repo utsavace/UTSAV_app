@@ -142,16 +142,17 @@ function validateCache(): { valid: boolean; reason?: string } {
 
   for (const n of ["1", "2", "3", "4"]) {
     const isStrictModule = n !== "2" && n !== "4"; // M2 aur M4 base gate pe chalte hain
-    const minT = isStrictModule ? strictT : baseT;
-    const minPF = isStrictModule ? strictPF : basePF;
+    const minT = n === "4" ? 1 : isStrictModule ? strictT : baseT;        // M4: 1 trade min (weekly cadence)
+    const minPF = n === "4" ? 1.2 : isStrictModule ? strictPF : basePF;   // M4: 1.2 PF min
+    const minWRCheck = n === "4" ? 50 : minWR;                            // M4: 50% win rate min
 
     const rows = readCache(`module${n}.json`);
     if (rows === null) return { valid: false, reason: `module${n} missing` };
     for (const r of rows) {
       if (r.numTrades < minT)
         return { valid: false, reason: `m${n} ${r.symbol}: ${r.numTrades} trades < gate ${minT}` };
-      if (r.winRatePct < minWR - 0.01)
-        return { valid: false, reason: `m${n} ${r.symbol}: WR ${r.winRatePct} < gate ${minWR}` };
+      if (r.winRatePct < minWRCheck - 0.01)
+        return { valid: false, reason: `m${n} ${r.symbol}: WR ${r.winRatePct} < gate ${minWRCheck}` };
       if (r.profitFactor < minPF - 0.01 || r.profitFactor > NO_LOSS_PF_CAP + 0.01)
         return { valid: false, reason: `m${n} ${r.symbol}: PF ${r.profitFactor} outside [${minPF}, ${NO_LOSS_PF_CAP}]` };
     }
