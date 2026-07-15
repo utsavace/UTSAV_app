@@ -66,6 +66,7 @@ export default function App() {
   const [m2Strict, setM2Strict] = useState(true); // M2: highlight rows meeting strict 15/2.5 (default ON)
   const [m4MinTrades, setM4MinTrades] = useState(7);   // M4 filter: min completed trades
   const [m4MinWinRate, setM4MinWinRate] = useState(60); // M4 filter: min win rate %
+  const [m4Strict, setM4Strict] = useState(false);      // M4 strict: filter applies to live signals too
   const [historyStart, setHistoryStart] = useState(() => {
     const d = new Date();
     d.setFullYear(d.getFullYear() - 5); // default: last 5 years; pick any older date to go further back
@@ -418,8 +419,8 @@ export default function App() {
     // M4 tab: apply user-selected min trades + win rate filter
     if (tab === 4) {
       result = result.filter((r) =>
-        r.liveSignal || // live signals always show regardless of history
-        (r.numTrades >= m4MinTrades && r.winRatePct >= m4MinWinRate)
+        (!m4Strict && r.liveSignal) || // Option A (default): live signals bypass filter
+        (r.numTrades >= m4MinTrades && r.winRatePct >= m4MinWinRate) // history filter
       );
     }
     if (sortField) {
@@ -442,7 +443,7 @@ export default function App() {
       });
     }
     return result;
-  }, [rows, searchQuery, liveOnly, sortField, sortAsc, pbOn, pbSnap, tab, m4MinTrades, m4MinWinRate]);
+  }, [rows, searchQuery, liveOnly, sortField, sortAsc, pbOn, pbSnap, tab, m4MinTrades, m4MinWinRate, m4Strict]);
 
   const g = meta?.gate;
   const needsScan = meta?.needsScan && !pbOn; // playback has its own data source
@@ -764,9 +765,17 @@ export default function App() {
                         ))}
                       </select>
                     </div>
-                    {(m4MinTrades !== 7 || m4MinWinRate !== 60) && (
+                    <button
+                      className={`toggle-filter-btn ${m4Strict ? "active" : ""}`}
+                      onClick={() => setM4Strict(!m4Strict)}
+                      title={m4Strict ? "Strict ON: filter sabpe laga hai — live signals bhi tab dikhenge jab criteria meet ho" : "Strict OFF: live signals hamesha dikhenge, filter sirf historical pe"}
+                    >
+                      <span className="toggle-dot" />
+                      Strict Filter
+                    </button>
+                    {(m4MinTrades !== 7 || m4MinWinRate !== 60 || m4Strict) && (
                       <button
-                        onClick={() => { setM4MinTrades(7); setM4MinWinRate(60); }}
+                        onClick={() => { setM4MinTrades(7); setM4MinWinRate(60); setM4Strict(false); }}
                         style={{ background: "transparent", border: "1px solid #2a3342", color: "#8e9ba9", borderRadius: "6px", padding: "4px 10px", fontSize: "11px", fontFamily: "monospace", cursor: "pointer" }}
                       >
                         Reset
