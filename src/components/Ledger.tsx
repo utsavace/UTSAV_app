@@ -339,7 +339,7 @@ export function Ledger({
         stop = Math.round(r.liveStop);
         target = Math.round(r.liveTarget);
         stopPct = Math.round(((entry - stop) / entry) * 100);
-        targetLabel = isM4 ? "structural pivot rule" : "backtest-validated exit rule";
+        targetLabel = isM4 ? "ATR-based exit rule (2.5x SL / 5x target)" : "backtest-validated exit rule";
       } else {
         stopPct = isM2 ? 5 : 8;
         stop = Math.round(entry * (1 - stopPct / 100));

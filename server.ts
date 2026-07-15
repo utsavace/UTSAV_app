@@ -942,6 +942,7 @@ app.get("/api/divergence/chart", (req, res) => {
       asOf: asOf || null,
       dates: ohlcv.slice(startIdx).map((c: any) => c.date),
       closes: closes.slice(startIdx).map((x: number) => Math.round(x * 100) / 100),
+      opens: ohlcv.slice(startIdx).map((c: any) => Math.round(c.open * 100) / 100),
       highs: ohlcv.slice(startIdx).map((c: any) => Math.round(c.high * 100) / 100),
       lows: ohlcv.slice(startIdx).map((c: any) => Math.round(c.low * 100) / 100),
       rsi: rsi.slice(startIdx).map((x: number) => Math.round((x || 50) * 10) / 10),
