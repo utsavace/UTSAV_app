@@ -1104,40 +1104,104 @@ function parseYahooChart(jsonData: any): OHLCV[] {
 
 // ---------------- LIVE YAHOO FINANCE DATA GETTER ----------------
 
+// ── DATA SOURCES ─────────────────────────────────────────────────────────────
+// Priority: Yahoo Finance (primary) → Stooq (fallback) → Yahoo query2 (last resort)
+// Each source returns OHLCV[] or null. First successful result wins.
+// This way if Yahoo blocks/rate-limits, Stooq silently takes over.
+
+async function fetchWithTimeout(url: string, headers: Record<string, string> = {}, timeoutMs = 8000): Promise<Response | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await (globalThis as any).fetch(url, { signal: controller.signal, headers });
+    clearTimeout(timer);
+    return res;
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
+}
+
+async function fetchFromYahoo(symbol: string, period1: number, period2: number): Promise<OHLCV[] | null> {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d`;
+  const res = await fetchWithTimeout(url, {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  });
+  if (!res || !res.ok) return null;
+  try {
+    const data = await res.json();
+    const ohlcv = parseYahooChart(data);
+    return ohlcv.length > 35 ? ohlcv : null;
+  } catch { return null; }
+}
+
+async function fetchFromYahoo2(symbol: string, period1: number, period2: number): Promise<OHLCV[] | null> {
+  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d`;
+  const res = await fetchWithTimeout(url, {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+  });
+  if (!res || !res.ok) return null;
+  try {
+    const data = await res.json();
+    const ohlcv = parseYahooChart(data);
+    return ohlcv.length > 35 ? ohlcv : null;
+  } catch { return null; }
+}
+
+async function fetchFromStooq(symbol: string): Promise<OHLCV[] | null> {
+  // Stooq uses same .NS suffix, returns CSV: Date,Open,High,Low,Close,Volume
+  // Data goes back ~20 years — more than enough for our 5yr backtest
+  const url = `https://stooq.com/q/d/l/?s=${symbol.toLowerCase()}&i=d`;
+  const res = await fetchWithTimeout(url, {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+  }, 10000);
+  if (!res || !res.ok) return null;
+  try {
+    const text = await res.text();
+    const lines = text.trim().split("\n");
+    if (lines.length < 3) return null; // header + at least 2 rows
+    const ohlcv: OHLCV[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].trim().split(",");
+      if (parts.length < 5) continue;
+      const [date, open, high, low, close, volume] = parts;
+      if (!date || isNaN(Number(close))) continue;
+      ohlcv.push({
+        date,
+        open: parseFloat(open),
+        high: parseFloat(high),
+        low: parseFloat(low),
+        close: parseFloat(close),
+        volume: volume ? parseInt(volume) : 0
+      });
+    }
+    // Stooq returns newest first — reverse to chronological
+    ohlcv.reverse();
+    return ohlcv.length > 35 ? ohlcv : null;
+  } catch { return null; }
+}
+
 export async function fetchStockData(symbol: string): Promise<OHLCV[] | null> {
   const period2 = Math.floor(Date.now() / 1000);
   const period1 = Math.floor(new Date("2005-01-01T00:00:00Z").getTime() / 1000);
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d`;
 
-  // Retry with exponential backoff + jitter — 500 tickers × parallel fetches WILL hit
-  // Yahoo rate limits sometimes; without retries half the universe silently degrades
-  // to synthetic data.
+  // Source 1: Yahoo query1 (primary — fastest, most data)
   for (let attempt = 1; attempt <= FETCH_RETRIES; attempt++) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 8000); // 8s cap so a blocked network can't hang the scan
-      const res = await (globalThis as any).fetch(url, {
-        signal: controller.signal,
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-      });
-      clearTimeout(timer);
-
-      if (res.ok) {
-        const jsonData = await res.json();
-        const ohlcv = parseYahooChart(jsonData);
-        if (ohlcv.length > 35) return ohlcv;
-        return null; // valid response but not enough data — retrying won't help
-      }
-      // 429/5xx → fall through to backoff & retry
-    } catch (e) {
-      // network error / timeout → backoff & retry
-    }
+    const data = await fetchFromYahoo(symbol, period1, period2);
+    if (data) return data;
     if (attempt < FETCH_RETRIES) {
       await new Promise(r => setTimeout(r, 700 * attempt + Math.random() * 500));
     }
   }
+
+  // Source 2: Stooq (fallback — different server, avoids Yahoo rate limits)
+  const stooqData = await fetchFromStooq(symbol);
+  if (stooqData) return stooqData;
+
+  // Source 3: Yahoo query2 (last resort — different Yahoo endpoint)
+  const yahoo2Data = await fetchFromYahoo2(symbol, period1, period2);
+  if (yahoo2Data) return yahoo2Data;
+
   return null;
 }
 

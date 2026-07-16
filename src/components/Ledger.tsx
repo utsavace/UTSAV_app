@@ -333,6 +333,20 @@ export function Ledger({
       const isM2 = r.strategyId === "m2_rounding_bottom";
       const isM4 = r.strategyId === "m4_divergence";
 
+      // M4: agar current price entry se 2% se zyada door ho to signal expired
+      if (isM4 && r.lastExitPrice && r.lastExitPrice > 0) {
+        const drift = Math.abs((r.lastExitPrice - entry) / entry) * 100;
+        if (drift > 2) {
+          const dir = r.lastExitPrice > entry ? "upar" : "neeche";
+          return (
+            <div className="mb-3 p-3 rounded-lg bg-orange-500/5 border border-orange-500/40 font-mono text-xs text-orange-100">
+              <div className="font-bold text-orange-400 mb-1">⚠️ Entry Expired — signal purana ho gaya</div>
+              <div>Signal entry zone tha <strong>₹{Math.round(entry)}</strong>, par price ab <strong>₹{Math.round(r.lastExitPrice)}</strong> pe hai — <strong>{drift.toFixed(1)}% {dir}</strong> nikal gaya (2% threshold se zyada). Is signal pe ab nahi lena chahiye, agli divergence ka wait karo.</div>
+            </div>
+          );
+        }
+      }
+
       let stop = 0, target = 0, stopPct = 0, targetLabel = "";
 
       if (r.liveStop && r.liveTarget) {
