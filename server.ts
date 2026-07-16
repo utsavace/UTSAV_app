@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import { exec } from "child_process";
 import dotenv from "dotenv";
-import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, toWeekly, loadNifty500Tickers } from "./scan.ts";
+import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, toWeekly, loadNifty500Tickers, M4_MIN_TRADES, M4_MIN_WIN_RATE, M4_MIN_PF } from "./scan.ts";
 import { runCompareSl } from "./compareSlEngine.ts";
 
 // Load env for GEMINI_API_KEY (README uses .env.local; AI Studio injects at runtime)
@@ -553,15 +553,19 @@ app.get("/api/playback/snapshot", (req, res) => {
       }));
     }
 
-    // Module 4: RSI Divergence (base gate) — live signal carries structure-based stop/tgt
+    // Module 4: RSI Divergence — relaxed gate (weekly cadence, avg ~2 trades/stock)
     const m4 = results["m4_divergence"];
-    if (m4 && m4.passedBase && st.strategies["m4_divergence"]) {
-      const live4 = st.strategies["m4_divergence"].signals.find((sg) => sg.d === D);
-      module4Rows.push(mkRow(st, "m4_divergence", m4, live4, {
-        strategyLabel: "RSI Divergence",
-        entryCond: "Bullish RSI divergence (price lower-low, RSI higher-low from oversold), entry next open after pivot confirms",
-        exitCond: "SL 1% below divergence low, target 2R, ya bearish divergence confirm hone pe exit",
-        fields: { hasChart: true, liveStop: live4?.stop ?? null, liveTarget: live4?.tgt ?? null }
+    const m4live4 = st.strategies["m4_divergence"]?.signals.find((sg: any) => sg.d === D);
+    const m4passed = m4 && st.strategies["m4_divergence"] && (
+      m4live4 ||  // live signal → always include
+      (m4.numTrades >= M4_MIN_TRADES && m4.winRatePct >= M4_MIN_WIN_RATE && m4.profitFactor >= M4_MIN_PF)
+    );
+    if (m4passed) {
+      module4Rows.push(mkRow(st, "m4_divergence", m4, m4live4, {
+        strategyLabel: "RSI Divergence (Weekly)",
+        entryCond: "WEEKLY bullish RSI divergence (price lower-low, RSI higher-low from oversold), entry next week's open after pivot confirms",
+        exitCond: "SL 2.5x ATR, target 5x ATR (weekly), ya bearish divergence confirm hone pe exit",
+        fields: { hasChart: true, liveStop: m4live4?.stop ?? null, liveTarget: m4live4?.tgt ?? null }
       }));
     }
   }
