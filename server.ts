@@ -482,6 +482,35 @@ app.get("/api/playback/snapshot", (req, res) => {
   const D = String(req.query.date || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(D)) return res.status(400).json({ ok: false, error: "date=YYYY-MM-DD chahiye" });
 
+  // ±1% price proximity + 2-bar window signal finder (same rule as live scan)
+  // Signals array is sorted by date. Find the most recent signal on or before D
+  // that is within 2 bars of D AND within ±1% of current price (candlesUpTo last close).
+  function findLiveSignal(signals: PbSignal[], symbol: string, D: string): PbSignal | undefined {
+    const axis = db!.axis;
+    const dIdx = axis.indexOf(D);
+    if (dIdx === -1) return undefined;
+    // Get current price as of D
+    const raw = db!.stocks.find((s) => s.symbol === symbol);
+    const candles = raw ? candlesUpTo(symbol, D) : null;
+    const currentPrice = candles && candles.length > 0 ? candles[candles.length - 1].close : null;
+    // Walk signals in reverse to find most recent
+    for (let i = signals.length - 1; i >= 0; i--) {
+      const sg = signals[i];
+      if (sg.d > D) continue; // future signal — skip
+      const sgIdx = axis.indexOf(sg.d);
+      if (sgIdx === -1) continue;
+      const barsAgo = dIdx - sgIdx;
+      if (barsAgo > 2) break; // too old — no point going further back
+      if (barsAgo === 0) return sg; // exact signal day — always show
+      // Day 1 or Day 2: check ±1% price drift
+      if (currentPrice && sg.p) {
+        const drift = Math.abs((currentPrice - sg.p) / sg.p) * 100;
+        if (drift <= 1.0) return sg;
+      }
+    }
+    return undefined;
+  }
+
   const mkRow = (st: PbStock, sid: string, stats: any, live: PbSignal | undefined, extra: any = {}) => ({
     symbol: st.symbol,
     name: st.name,
@@ -533,14 +562,14 @@ app.get("/api/playback/snapshot", (req, res) => {
       if (r.passedBase) { breadthCount[s.id].passes++; breadthCount[s.id].pfs.push(r.profitFactor); }
     }
     if (best.passedStrict) {
-      const live = st.strategies[bestId].signals.find((sg) => sg.d === D);
+      const live = findLiveSignal(st.strategies[bestId].signals, st.symbol, D);
       module1Rows.push(mkRow(st, bestId, best, live, { fields: { liveStop: live?.stop ?? null, liveTarget: live?.tgt ?? null } }));
     }
 
     // Module 2 as-of D
     const m2 = results["m2_rounding_bottom"];
     if (m2 && m2.passedBase) {
-      const live = st.strategies["m2_rounding_bottom"].signals.find((sg) => sg.d === D);
+      const live = findLiveSignal(st.strategies["m2_rounding_bottom"].signals, st.symbol, D);
       const lastT = m2.closed[m2.closed.length - 1];
       const dp = live?.dp ?? lastT?.depthPct ?? 18;
       const dm = live?.dm ?? lastT?.durationM ?? 12;
@@ -555,7 +584,9 @@ app.get("/api/playback/snapshot", (req, res) => {
 
     // Module 4: RSI Divergence — relaxed gate (weekly cadence, avg ~2 trades/stock)
     const m4 = results["m4_divergence"];
-    const m4live4 = st.strategies["m4_divergence"]?.signals.find((sg: any) => sg.d === D);
+    const m4live4 = st.strategies["m4_divergence"]?.signals
+      ? findLiveSignal(st.strategies["m4_divergence"].signals, st.symbol, D)
+      : undefined;
     const m4passed = m4 && st.strategies["m4_divergence"] && (
       m4live4 ||  // live signal → always include
       (m4.numTrades >= M4_MIN_TRADES && m4.winRatePct >= M4_MIN_WIN_RATE && m4.profitFactor >= M4_MIN_PF)
@@ -578,7 +609,7 @@ app.get("/api/playback/snapshot", (req, res) => {
   for (const { st, results } of perStock) {
     const r = results[winner.id];
     if (r && r.passedStrict) {
-      const live = st.strategies[winner.id].signals.find((sg) => sg.d === D);
+      const live = findLiveSignal(st.strategies[winner.id].signals, st.symbol, D);
       module3Rows.push(mkRow(st, winner.id, r, live, { fields: { strategyId: "m3_best_overall", liveStop: live?.stop ?? null, liveTarget: live?.tgt ?? null } }));
     }
   }

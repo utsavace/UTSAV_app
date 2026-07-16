@@ -980,19 +980,25 @@ function backtestStrategy(
   const lastExitPrice = lastTradeExit !== null ? lastTradeExit : (closes[closes.length - 1] || 0);
   const lastReturnPct = lastTradeReturn !== null ? lastTradeReturn : 0;
 
-  // LIVE = (a) a fresh trigger on the very latest close (enter at tomorrow's open), OR
-  //        (b) a still-open position entered within the last 5 sessions.
+  // LIVE = (a) fresh trigger on the very latest close (enter at tomorrow's open), OR
+  //        (b) most recent signal was within last 2 sessions AND current price is within ±1%
+  //            of the signal price — meaning entry is still actionable.
+  //        The old "5 sessions open position" rule is REMOVED — it caused stale signals
+  //        to keep showing days after the entry window had passed.
   let liveSignal = signalOnLastBar;
-  if (!liveSignal && tradeLog.length > 0) {
-    const lastTrade = tradeLog[tradeLog.length - 1];
-    const entryIdx = dates.indexOf(lastTrade.entryDate);
-    const isRecentEntry = entryIdx !== -1 && (dates.length - 1 - entryIdx) <= 5;
-    const isStillOpen = lastTrade.exitDate === dates[dates.length - 1];
-    if (isRecentEntry && isStillOpen) {
+  if (!liveSignal && signals.length > 0) {
+    const lastSig = signals[signals.length - 1];
+    const lastSigIdx = dates.indexOf(lastSig.d);
+    const barsAgo = dates.length - 1 - lastSigIdx;
+    const currentPrice = closes[closes.length - 1];
+    const sigPrice = lastSig.p;
+    const priceDrift = Math.abs((currentPrice - sigPrice) / sigPrice) * 100;
+    // Show signal for up to 2 bars (signal day + next day = entry day) AND price within ±1%
+    if (barsAgo <= 2 && priceDrift <= 1.0) {
       liveSignal = true;
-      if (overrideExit) {
-        liveStopOut = Math.round(stratStopP * 100) / 100;
-        liveTargetOut = Math.round(stratTgtP * 100) / 100;
+      if (overrideExit && lastSig.stop && lastSig.tgt) {
+        liveStopOut = lastSig.stop;
+        liveTargetOut = lastSig.tgt;
       }
     }
   }
@@ -1533,13 +1539,16 @@ export function backtestDivergence(dailyOhlcv: OHLCV[]): BacktestStats {
     if (dd > maxDD) maxDD = dd;
   }
   let liveSignal = signalOnLastBar;
-  if (!liveSignal && tradeLog.length > 0) {
-    const lt = tradeLog[tradeLog.length - 1];
-    const ei = dates.indexOf(lt.entryDate);
-    if (ei !== -1 && dates.length - 1 - ei <= 5 && lt.exitDate === dates[dates.length - 1] && lt.forced) {
+  if (!liveSignal && signals.length > 0) {
+    const lastSig = signals[signals.length - 1];
+    const lastSigIdx = dates.indexOf(lastSig.d);
+    const barsAgo = dates.length - 1 - lastSigIdx;
+    const currentPrice = closes[closes.length - 1];
+    const priceDrift = Math.abs((currentPrice - lastSig.p) / lastSig.p) * 100;
+    if (barsAgo <= 2 && priceDrift <= 1.0) {
       liveSignal = true;
-      liveStop = Math.round(stopP * 100) / 100;
-      liveTarget = Math.round(tgtP * 100) / 100;
+      liveStop = lastSig.stop ?? liveStop;
+      liveTarget = lastSig.tgt ?? liveTarget;
     }
   }
   return {
