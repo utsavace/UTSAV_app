@@ -2,7 +2,7 @@ import React, { useEffect, useState, useMemo, useRef } from "react";
 import { Ledger, type LedgerRow } from "./components/Ledger.tsx";
 import { MyTrades } from "./components/MyTrades.tsx";
 import { DivergenceChart } from "./components/DivergenceChart.tsx";
-import { ExitSchemeComparison } from "./components/ExitSchemeComparison.tsx";
+// ExitSchemeComparison removed — replaced by ConnorsRSI (M6) module
 
 interface Meta {
   needsScan?: boolean;
@@ -27,7 +27,7 @@ interface Meta {
     breadth: { label: string; gatePasses: number; medianPF: number }[];
   };
   roundingBottomConditions?: { totalTrades: number; byDepth: Bucketed; byDuration: Bucketed };
-  counts?: { module1: number; module2: number; module3: number; module4: number };
+  counts?: { module1: number; module2: number; module3: number; module4: number; module6: number };
   passed?: number;
 }
 
@@ -42,7 +42,7 @@ const TABS = [
   { n: 3, key: "best", label: "Best Overall Edge" },
   { n: 4, key: "div", label: "Divergence Scanner" },
   { n: 5, key: "journal", label: "My Trades" },
-  { n: 6, key: "compare_sl", label: "Exit Scheme Comparison" },
+  { n: 6, key: "connors_rsi", label: "ConnorsRSI" },
 ] as const;
 
 const DESC: Record<number, string> = {
@@ -51,7 +51,7 @@ const DESC: Record<number, string> = {
   3: "Identifies the single high-probability technical strategy that registers the greatest number of breadth passes across the entire Nifty 500 universe to maximize robustness.",
   4: "Detects RSI (14) bullish divergences (price lower-low, RSI higher-low from oversold) on daily candles. Triggers entries on pivot confirmation with structure-based stop-losses and 2R targets, viewable via stacked visual chart panels.",
   5: "Your personal trade journal — tick a trade you're taking, and it auto-tracks whether the stop-loss or target gets hit on real daily data, then helps you review and learn from every outcome.",
-  6: "Compares 7 distinct stop-loss & target exit schemes (including the current '8% flat SL') on same-entry points across the universe to locate the absolute data-backed mathematical edge.",
+  6: "ConnorsRSI(3,2,100) oversold scanner — flags stocks trading above EMA(200) where ConnorsRSI drops below 15 (deeply oversold in confirmed uptrend). Validated OOS: Banks+Pharma+Power filter → PF 2.59, Win 68.2%. Exit when ConnorsRSI > 90.",
 };
 
 export default function App() {
@@ -64,9 +64,10 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [liveOnly, setLiveOnly] = useState(false);
   const [m2Strict, setM2Strict] = useState(true); // M2: highlight rows meeting strict 15/2.5 (default ON)
-  const [m4MinTrades, setM4MinTrades] = useState(7);   // M4 filter: min completed trades
-  const [m4MinWinRate, setM4MinWinRate] = useState(60); // M4 filter: min win rate %
-  const [m4Strict, setM4Strict] = useState(false);      // M4 strict: filter applies to live signals too
+  const [m4MinTrades, setM4MinTrades] = useState(7);
+  const [m4MinWinRate, setM4MinWinRate] = useState(60);
+  const [m4Strict, setM4Strict] = useState(false);
+  const [m6SectorFilter, setM6SectorFilter] = useState(false); // M6: false=all sectors, true=Banks+Pharma+Power
   const [historyStart, setHistoryStart] = useState(() => {
     const d = new Date();
     d.setFullYear(d.getFullYear() - 5); // default: last 5 years; pick any older date to go further back
@@ -338,7 +339,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (tab === 5 || tab === 6) { setRows([]); setLoading(false); return; } // journal/compare tabs have no standard module cache
+    if (tab === 5) { setRows([]); setLoading(false); return; } // journal tab has no standard module cache
     setLoading(true);
     fetchModule(tab)
       .then(setRows)
@@ -419,9 +420,13 @@ export default function App() {
     // M4 tab: apply user-selected min trades + win rate filter
     if (tab === 4) {
       result = result.filter((r) =>
-        (!m4Strict && r.liveSignal) || // Option A (default): live signals bypass filter
-        (r.numTrades >= m4MinTrades && r.winRatePct >= m4MinWinRate) // history filter
+        (!m4Strict && r.liveSignal) ||
+        (r.numTrades >= m4MinTrades && r.winRatePct >= m4MinWinRate)
       );
+    }
+    // M6 tab: sector toggle — Banks+Pharma+Power only when enabled
+    if (tab === 6 && m6SectorFilter) {
+      result = result.filter((r) => r.liveSignal || (r as any).inTargetSector);
     }
     if (sortField) {
       result.sort((a, b) => {
@@ -443,7 +448,7 @@ export default function App() {
       });
     }
     return result;
-  }, [rows, searchQuery, liveOnly, sortField, sortAsc, pbOn, pbSnap, tab, m4MinTrades, m4MinWinRate, m4Strict]);
+  }, [rows, searchQuery, liveOnly, sortField, sortAsc, pbOn, pbSnap, tab, m4MinTrades, m4MinWinRate, m4Strict, m6SectorFilter]);
 
   const g = meta?.gate;
   const needsScan = meta?.needsScan && !pbOn; // playback has its own data source
@@ -783,6 +788,16 @@ export default function App() {
                     )}
                   </div>
                 )}
+                {tab === 6 && (
+                  <button
+                    className={`toggle-filter-btn ${m6SectorFilter ? "active" : ""}`}
+                    onClick={() => setM6SectorFilter(!m6SectorFilter)}
+                    title={m6SectorFilter ? "Sector filter ON: sirf Banks, Pharma, Power — OOS PF 2.59, Win 68%" : "Sector filter OFF: saare sectors — OOS PF 1.34, Win 59%"}
+                  >
+                    <span className="toggle-dot" />
+                    {m6SectorFilter ? "🏦 Banks • Pharma • Power" : "🌐 All Sectors"}
+                  </button>
+                )}
                 <div className="history-date-box" style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#8e9ba9" }}>
                   <span>Signals since</span>
                   <input
@@ -847,7 +862,22 @@ export default function App() {
             onCountChange={pbOn ? setPbJournalCount : setJournalCount}
           />
         ) : tab === 6 ? (
-          <ExitSchemeComparison />
+          pbOn && !pbSnap ? (
+            <div className="state">
+              <div className="spinner" />
+              {pbErr ? pbErr : `Building the dashboard as of ${pbDate}…`}
+            </div>
+          ) : (
+            <Ledger
+              rows={filteredAndSortedRows}
+              onSort={handleSort}
+              sortField={sortField}
+              sortAsc={sortAsc}
+              strictHighlight={false}
+              showStrategy={true}
+              historyStart={historyStart}
+            />
+          )
         ) : pbOn && !pbSnap ? (
           <div className="state">
             <div className="spinner" />

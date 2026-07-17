@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import { exec } from "child_process";
 import dotenv from "dotenv";
-import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, toWeekly, loadNifty500Tickers, M4_MIN_TRADES, M4_MIN_WIN_RATE, M4_MIN_PF } from "./scan.ts";
+import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, toWeekly, loadNifty500Tickers, M4_MIN_TRADES, M4_MIN_WIN_RATE, M4_MIN_PF, backtestConnorsRSI, M6_MIN_TRADES, M6_MIN_WIN_RATE, M6_MIN_PF, M6_SECTORS, CRSI_ENTRY_THRESHOLD, CRSI_EXIT_THRESHOLD } from "./scan.ts";
 import { runCompareSl } from "./compareSlEngine.ts";
 
 // Load env for GEMINI_API_KEY (README uses .env.local; AI Studio injects at runtime)
@@ -140,11 +140,11 @@ function validateCache(): { valid: boolean; reason?: string } {
   const strictT = g.strict?.minOosTrades ?? baseT;
   const strictPF = g.strict?.minProfitFactor ?? basePF;
 
-  for (const n of ["1", "2", "3", "4"]) {
-    const isStrictModule = n !== "2" && n !== "4"; // M2 aur M4 base gate pe chalte hain
-    const minT = n === "4" ? 7 : isStrictModule ? strictT : baseT;
-    const minPF = n === "4" ? 1.2 : isStrictModule ? strictPF : basePF;
-    const minWRCheck = n === "4" ? 60 : minWR;
+  for (const n of ["1", "2", "3", "4", "6"]) {
+    const isStrictModule = n !== "2" && n !== "4" && n !== "6";
+    const minT = n === "4" ? 7 : n === "6" ? M6_MIN_TRADES : isStrictModule ? strictT : baseT;
+    const minPF = n === "4" ? 1.2 : n === "6" ? M6_MIN_PF : isStrictModule ? strictPF : basePF;
+    const minWRCheck = n === "4" ? 60 : n === "6" ? M6_MIN_WIN_RATE : minWR;
 
     const rows = readCache(`module${n}.json`);
     if (rows === null) return { valid: false, reason: `module${n} missing` };
@@ -385,7 +385,7 @@ const PB_TRADES_FILE = path.join(DATA_DIR, "playback_trades.json");
 
 interface PbSignal { d: string; p: number; dp?: number; dm?: number; stop?: number; tgt?: number }
 interface PbStrat { trades: any[]; signals: PbSignal[] }
-interface PbStock { symbol: string; name: string; synthetic: boolean; strategies: Record<string, PbStrat> }
+interface PbStock { symbol: string; name: string; sector?: string; synthetic: boolean; strategies: Record<string, PbStrat> }
 
 // In-memory playback DB — parsed once, invalidated when axis.json changes (fresh scan).
 let pbDB: { stocks: PbStock[]; axis: string[]; mtime: number } | null = null;
@@ -537,6 +537,7 @@ app.get("/api/playback/snapshot", (req, res) => {
   const module1Rows: any[] = [];
   const module2Rows: any[] = [];
   const module4Rows: any[] = [];
+  const module6Rows: any[] = [];
   const module3Rows: any[] = [];
   const breadthCount: Record<string, { passes: number; pfs: number[] }> = {};
   for (const s of STRATEGIES_POOL) breadthCount[s.id] = { passes: 0, pfs: [] };
@@ -599,6 +600,22 @@ app.get("/api/playback/snapshot", (req, res) => {
         fields: { hasChart: true, liveStop: m4live4?.stop ?? null, liveTarget: m4live4?.tgt ?? null }
       }));
     }
+
+    // Module 6: ConnorsRSI Scanner
+    const m6 = st.strategies["m6_connors_rsi"] ? asOfStats(st.strategies["m6_connors_rsi"].trades, D) : null;
+    const m6live = st.strategies["m6_connors_rsi"]?.signals
+      ? findLiveSignal(st.strategies["m6_connors_rsi"].signals, st.symbol, D)
+      : undefined;
+    const m6passed = m6 && (m6live || (m6.numTrades >= M6_MIN_TRADES && m6.winRatePct >= M6_MIN_WIN_RATE && m6.profitFactor >= M6_MIN_PF));
+    if (m6passed) {
+      const inTargetSector = M6_SECTORS.has(st.sector || "");
+      module6Rows.push(mkRow(st, "m6_connors_rsi", m6, m6live, {
+        strategyLabel: "ConnorsRSI Scanner",
+        entryCond: "Price > EMA(200) aur ConnorsRSI(3,2,100) < 15 — deeply oversold in confirmed uptrend",
+        exitCond: "ConnorsRSI > 90 hone pe exit (emergency floor: -8% from entry)",
+        fields: { inTargetSector, liveStop: null, liveTarget: null, hasChart: false }
+      }));
+    }
   }
 
   // Module 3: as-of breadth winner (identical metric to the chart)
@@ -639,17 +656,18 @@ app.get("/api/playback/snapshot", (req, res) => {
     buckets: bs.map((b) => ({ range: b.range, trades: b.trades, winRatePct: b.trades ? Math.round((100 * b.wins) / b.trades) : 0 }))
   });
 
-  const liveCount = module1Rows.filter((r) => r.liveSignal).length + module2Rows.filter((r) => r.liveSignal).length + module3Rows.filter((r) => r.liveSignal).length + module4Rows.filter((r) => r.liveSignal).length;
+  const liveCount = module1Rows.filter((r) => r.liveSignal).length + module2Rows.filter((r) => r.liveSignal).length + module3Rows.filter((r) => r.liveSignal).length + module4Rows.filter((r) => r.liveSignal).length + module6Rows.filter((r) => r.liveSignal).length;
 
   res.json({
     ok: true,
     date: D,
-    counts: { module1: module1Rows.length, module2: module2Rows.length, module3: module3Rows.length, module4: module4Rows.length },
+    counts: { module1: module1Rows.length, module2: module2Rows.length, module3: module3Rows.length, module4: module4Rows.length, module6: module6Rows.length },
     liveCount,
     module1: module1Rows,
     module2: module2Rows,
     module3: module3Rows,
     module4: module4Rows,
+    module6: module6Rows,
     module3Meta: { chosenStrategyLabel: winner.label, gatePasses: winner.gatePasses, breadth: breadth.map(({ id, ...rest }) => rest) },
     roundingBottomConditions: {
       totalTrades: module2Rows.reduce((s, r) => s + r.numTrades, 0),

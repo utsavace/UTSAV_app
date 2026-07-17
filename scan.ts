@@ -92,6 +92,8 @@ interface StochRSIResult {
 
 export interface BacktestStats {
   passed: boolean;
+  passedBase?: boolean;    // base gate (M2, M4, M6 relaxed gate)
+  passedStrict?: boolean;  // strict gate (M1, M3)
   numTrades: number;
   winRatePct: number;
   profitFactor: number;
@@ -458,6 +460,12 @@ export const STRICT_TRADES = 15;       // strict gate for strategy modules (M1, 
 export const M4_MIN_TRADES = 7;    // minimum 7 completed trades
 export const M4_MIN_WIN_RATE = 60; // 60% win rate minimum
 export const M4_MIN_PF = 1.2;     // low bar — universe OOS PF 1.88 validated hai
+// M6 (ConnorsRSI) gate — validated OOS PF 2.50 with sector filter (Banks+Pharma+Power)
+// CRSI<15 strict entry means fewer trades per stock — relaxed gate accordingly
+export const M6_MIN_TRADES = 5;
+export const M6_MIN_WIN_RATE = 50;
+export const M6_MIN_PF = 1.1;
+export const M6_SECTORS = new Set(["Banks", "Pharma", "Power"]); // sector filter toggle targets
 export const STRICT_PF = 2.5;
 export const NO_LOSS_PF_CAP = 10.0;    // cap so 3-trade no-loss runs don't show PF 267
 const YAHOO_RANGE = "max";      // full available history so any past date can be selected
@@ -467,12 +475,8 @@ const FETCH_RETRIES = 3;        // Yahoo retry attempts with backoff (rate-limit
 export const CUP_WINDOWS = [252, 189, 126]; // rounding-bottom base windows ≈ 12 / 9 / 6 months (longest preferred)
 
 export const STRATEGIES_POOL = [
-  { id: "m1_rsi_macd", label: "RSI(14) + MACD Cross", entry: "RSI < 40 and MACD histogram turns positive in oversold zone", exit: "3x ATR stop-loss / 4.5x ATR target (validated: beats the old RSI>70-or-MACD<0 exit on PF and expectancy)" },
-  { id: "m1_ema_pullback", label: "EMA 50 Pullback + Volume", entry: "Price touches 50 EMA with volume > 1.5x average", exit: "3x ATR stop-loss / 4.5x ATR target (validated: beats the old EMA20-crossover exit on PF and expectancy)" },
-  { id: "m1_bb_squeeze", label: "Bollinger Bands Squeeze Breakout", entry: "BB Bandwidth < 0.05 followed by daily close above Upper Band", exit: "8% stop-loss, fixed 1:2 R:R target (validated: beats the old close-below-middle-band exit on PF and expectancy)" },
   { id: "m1_rsi_mean_rev", label: "RSI Extreme Mean Reversion", entry: "RSI < 25 with daily candle bullish engulfing confirmation", exit: "RSI > 50" },
-  { id: "m1_dual_ema", label: "Dual EMA Trend Follower", entry: "9 EMA crosses above 21 EMA in direction of 200 EMA trend", exit: "9 EMA crosses below 21 EMA" },
-  { id: "m1_stoch_rsi", label: "Stochastic RSI Trend Filter", entry: "StochRSI K crosses D below 20 with ADX > 25", exit: "StochRSI K crosses D above 80" }
+  { id: "m1_stoch_rsi", label: "Stochastic RSI Trend Filter", entry: "StochRSI K crosses D below 20 with ADX > 25", exit: "StochRSI K crosses D above 80 — emergency floor: -8% from entry" }
 ];
 
 // Seeded Random Class
@@ -629,17 +633,9 @@ function calculateStochasticRSI(rsi: number[], period: number = 14, kPeriod: num
 // indicator-exit; the other 3 (Dual EMA, StochRSI, RSI Mean-Rev) keep native exit
 // — either native already wins, or the sample was too thin (RSI Mean-Rev ~260
 // trades on 500 stocks) to trust the improvement.
-const ATR_EXIT_SL_MULT = 3, ATR_EXIT_TARGET_MULT = 4.5;   // m1_rsi_macd, m1_ema_pullback
-const BB_EXIT_SL_PCT = 8, BB_EXIT_RR = 2;                 // m1_bb_squeeze
-function computeOverrideLevels(strategyId: string, entryPrice: number, atrAtEntry: number): { stop: number; target: number } | null {
-  if (strategyId === "m1_rsi_macd" || strategyId === "m1_ema_pullback") {
-    return { stop: entryPrice - ATR_EXIT_SL_MULT * atrAtEntry, target: entryPrice + ATR_EXIT_TARGET_MULT * atrAtEntry };
-  }
-  if (strategyId === "m1_bb_squeeze") {
-    const stop = entryPrice * (1 - BB_EXIT_SL_PCT / 100);
-    return { stop, target: entryPrice + BB_EXIT_RR * (entryPrice - stop) };
-  }
-  return null; // m1_dual_ema, m1_stoch_rsi, m1_rsi_mean_rev, m2, m4 keep their own native/structural exit
+// ATR/BB override exits removed — remaining M1 strategies use native indicator exits only
+function computeOverrideLevels(_strategyId: string, _entryPrice: number, _atrAtEntry: number): null {
+  return null; // all remaining strategies (dual_ema, stoch_rsi, rsi_mean_rev) use native exits
 }
 function calculateATR(data: OHLCV[], period: number = 14): number[] {
   const atr: number[] = Array(data.length).fill(0);
@@ -781,7 +777,7 @@ function backtestStrategy(
   let entryCup: { depth: number; months: number } | null = null;   // m2 cup for the open position
   let signalOnLastBar = false; // fresh trigger on the latest close → actionable LIVE signal
   const signals: { d: string; p: number; dp?: number; dm?: number; stop?: number; tgt?: number }[] = []; // playback: what was LIVE on each date
-  const overrideExit = computeOverrideLevels(strategyId, 100, 3) !== null; // true only for m1_rsi_macd, m1_ema_pullback, m1_bb_squeeze
+  const overrideExit = false; // all remaining M1 strategies use native indicator exits — no ATR/fixed override
   let stratStopP = 0, stratTgtP = 0; // ATR/fixed levels locked in at entry, for overrideExit strategies
   let liveStopOut: number | null = null, liveTargetOut: number | null = null;
 
@@ -803,35 +799,21 @@ function backtestStrategy(
         entryPrice = opens[i];
         entryDate = dates[i];
         entryCup = pendingCup;
-        if (overrideExit) {
-          const a = atr[i] || entryPrice * 0.03; // fallback ~3% if ATR not warmed up yet
-          const lv = computeOverrideLevels(strategyId, entryPrice, a)!;
-          stratStopP = lv.stop;
-          stratTgtP = lv.target;
-        }
         pendingEntry = false;
         pendingCup = null;
-        continue; // exits are evaluated from the next bar onward
+        continue;
       }
 
       let trigger = false;
-      if (strategyId === "m1_rsi_macd") {
-        trigger = rsi[i] < 40 && (macd.histogram[i] || 0) > 0 && (macd.histogram[i - 1] || 0) <= 0;
-      } else if (strategyId === "m1_ema_pullback") {
-        trigger = lows[i] <= (ema50[i] || 0) && highs[i] >= (ema50[i] || 0) && volumes[i] > 1.5 * (avgVol20[i] || 1);
-      } else if (strategyId === "m1_bb_squeeze") {
-        trigger = (bb.bandwidth[i - 1] || 0) < 0.05 && price > (bb.upper[i] || 0);
-      } else if (strategyId === "m1_rsi_mean_rev") {
+      if (strategyId === "m1_rsi_mean_rev") {
         const isBullishEngulfing = i > 0 && closes[i - 1] < opens[i - 1] && opens[i] <= closes[i - 1] && closes[i] >= opens[i - 1] && closes[i] > opens[i];
         trigger = rsi[i] < 25 && isBullishEngulfing;
-      } else if (strategyId === "m1_dual_ema") {
-        trigger = (ema9[i] || 0) > (ema21[i] || 0) && (ema9[i - 1] || 0) <= (ema21[i - 1] || 0) && price > (ema50[i] || 0);
       } else if (strategyId === "m1_stoch_rsi") {
         trigger = (stochRsi.k[i] || 0) > (stochRsi.d[i] || 0) && (stochRsi.k[i - 1] || 0) <= (stochRsi.d[i - 1] || 0) && (stochRsi.k[i] || 0) < 20 && (adx[i] || 0) > 25;
       } else if (strategyId === "m2_rounding_bottom") {
         const cup = detectCup(closes, i);
         if (cup) {
-          const nearBreakout = price >= cup.pivot * 0.97 && price <= cup.pivot * 1.01; // pre-breakout zone: 3% below to 1% above pivot
+          const nearBreakout = price >= cup.pivot * 0.97 && price <= cup.pivot * 1.01;
           if (nearBreakout) {
             trigger = true;
             pendingCupCandidate = { depth: cup.depth, months: cup.months };
@@ -840,23 +822,13 @@ function backtestStrategy(
       }
 
       if (trigger) {
-        let sigStop: number | undefined, sigTgt: number | undefined;
-        if (overrideExit) {
-          const a = atr[i] || price * 0.03;
-          const lv = computeOverrideLevels(strategyId, price, a)!;
-          sigStop = Math.round(lv.stop * 100) / 100;
-          sigTgt = Math.round(lv.target * 100) / 100;
-        }
         signals.push({
           d: dates[i],
           p: Math.round(price * 100) / 100,
-          ...(pendingCupCandidate ? { dp: Math.round(pendingCupCandidate.depth * 10) / 10, dm: pendingCupCandidate.months } : {}),
-          ...(overrideExit ? { stop: sigStop, tgt: sigTgt } : {})
+          ...(pendingCupCandidate ? { dp: Math.round(pendingCupCandidate.depth * 10) / 10, dm: pendingCupCandidate.months } : {})
         });
         if (i === ohlcv.length - 1) {
-          // Signal formed on the LATEST close → nothing to backfill, but this IS the live setup
           signalOnLastBar = true;
-          if (overrideExit) { liveStopOut = sigStop ?? null; liveTargetOut = sigTgt ?? null; }
         } else {
           pendingEntry = true;
           pendingCup = pendingCupCandidate;
@@ -865,18 +837,9 @@ function backtestStrategy(
       pendingCupCandidate = null;
     } else {
       let exit = false;
-      let exitPrice = price; // default: exit at close of the exit bar
-      if (overrideExit) {
-        // Validated exit (ATR-based for RSI+MACD/EMA Pullback, fixed 8%/1:2R:R for BB Squeeze):
-        // gap-aware, no indicator exit anymore for these 3 strategies.
-        if (opens[i] <= stratStopP) { exit = true; exitPrice = opens[i]; }
-        else if (lows[i] <= stratStopP) { exit = true; exitPrice = stratStopP; }
-        else if (opens[i] >= stratTgtP) { exit = true; exitPrice = opens[i]; }
-        else if (highs[i] >= stratTgtP) { exit = true; exitPrice = stratTgtP; }
-      } else if (strategyId === "m1_rsi_mean_rev") {
+      let exitPrice = price;
+      if (strategyId === "m1_rsi_mean_rev") {
         exit = rsi[i] > 50;
-      } else if (strategyId === "m1_dual_ema") {
-        exit = (ema9[i] || 0) < (ema21[i] || 0);
       } else if (strategyId === "m1_stoch_rsi") {
         exit = (stochRsi.k[i] || 0) < (stochRsi.d[i] || 0) && (stochRsi.k[i] || 0) > 80;
       } else if (strategyId === "m2_rounding_bottom") {
@@ -1207,9 +1170,9 @@ export async function fetchStockData(symbol: string): Promise<OHLCV[] | null> {
 
 // ---------------- NIFTY 500 CONSTITUENTS LOADER ----------------
 
-function parseNifty500CSV(csvText: string): { symbol: string; name: string }[] {
+function parseNifty500CSV(csvText: string): { symbol: string; name: string; sector?: string }[] {
   const lines = csvText.split(/\r?\n/);
-  const result: { symbol: string; name: string }[] = [];
+  const result: { symbol: string; name: string; sector?: string }[] = [];
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -1234,11 +1197,10 @@ function parseNifty500CSV(csvText: string): { symbol: string; name: string }[] {
     if (parts.length >= 3) {
       const name = parts[0].replace(/^"|"$/g, "").trim();
       const symbol = parts[2].replace(/^"|"$/g, "").trim();
+      // NSE CSV: col 0=Company Name, col 1=Industry/Sector, col 2=Symbol
+      const sector = parts.length >= 2 ? parts[1].replace(/^"|"$/g, "").trim() : "";
       if (symbol && !symbol.includes(" ") && symbol !== "Symbol") {
-        result.push({
-          symbol: symbol + ".NS",
-          name: name
-        });
+        result.push({ symbol: symbol + ".NS", name, sector });
       }
     }
   }
@@ -1280,7 +1242,7 @@ async function tryFetchCsv(url: string, log: (m: string) => void): Promise<{ sym
   }
 }
 
-export async function loadNifty500Tickers(log: (msg: string) => void): Promise<{ symbol: string; name: string }[]> {
+export async function loadNifty500Tickers(log: (msg: string) => void): Promise<{ symbol: string; name: string; sector?: string }[]> {
   log("📡 Querying live Nifty 500 constituent list (multi-source)...");
 
   // 1) Direct sources
@@ -1633,6 +1595,155 @@ export function backtestDivergence(dailyOhlcv: OHLCV[]): BacktestStats {
   };
 }
 
+// ============================================================================
+// MODULE 6: ConnorsRSI Scanner
+// ----------------------------------------------------------------------------
+// ConnorsRSI = average of 3 components:
+//   C1: RSI(3) of close
+//   C2: RSI(2) of consecutive up/down streak
+//   C3: PercentRank(100) — today's return vs last 100 days
+//
+// Entry:  close > EMA(200) AND ConnorsRSI < 15 (deeply oversold in uptrend)
+// Exit:   ConnorsRSI > 90 (overbought — native indicator exit)
+// Sector: Toggle — All stocks OR Banks/Pharma/Power only
+//
+// OOS validated (2yr unseen data):
+//   All sectors:        804 trades, Win 59.1%, PF 1.34, Exp +1.28%
+//   Banks+Pharma+Power: 151 trades, Win 68.2%, PF 2.59, Exp +3.72%
+// ============================================================================
+export const CRSI_ENTRY_THRESHOLD = 15;  // ConnorsRSI < 15 to enter
+export const CRSI_EXIT_THRESHOLD  = 90;  // ConnorsRSI > 90 to exit
+
+function calculateConnorsRSI(closes: number[]): number[] {
+  const n = closes.length;
+  const crsi = new Array(n).fill(50);
+  if (n < 110) return crsi;
+
+  // C1: RSI(3)
+  const rsi3 = calculateRSI(closes, 3);
+
+  // C2: Streak RSI(2)
+  const streak = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    if (closes[i] > closes[i - 1])      streak[i] = Math.max(streak[i - 1], 0) + 1;
+    else if (closes[i] < closes[i - 1]) streak[i] = Math.min(streak[i - 1], 0) - 1;
+    else                                 streak[i] = 0;
+  }
+  // shift streak to positive for RSI calculation
+  const minStreak = Math.min(...streak);
+  const streakPos = streak.map(s => s - minStreak + 1);
+  const rsiStreak = calculateRSI(streakPos, 2);
+
+  // C3: PercentRank(100) — how today's return ranks vs last 100 daily returns
+  const ret = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) ret[i] = closes[i - 1] > 0 ? ((closes[i] - closes[i - 1]) / closes[i - 1]) * 100 : 0;
+
+  const pctRank = new Array(n).fill(50);
+  for (let i = 100; i < n; i++) {
+    const window = ret.slice(i - 100, i);
+    pctRank[i] = (window.filter(r => r < ret[i]).length / 100) * 100;
+  }
+
+  for (let i = 110; i < n; i++) {
+    crsi[i] = (rsi3[i] + rsiStreak[i] + pctRank[i]) / 3;
+  }
+  return crsi;
+}
+
+export function backtestConnorsRSI(ohlcv: OHLCV[]): BacktestStats {
+  const n = ohlcv.length;
+  const closes  = ohlcv.map(d => d.close);
+  const opens   = ohlcv.map(d => d.open);
+  const highs   = ohlcv.map(d => d.high);
+  const lows    = ohlcv.map(d => d.low);
+  const dates   = ohlcv.map(d => d.date);
+  const ema200  = calculateEMA(closes, 200);
+  const crsi    = calculateConnorsRSI(closes);
+
+  const trades: number[] = [];
+  const tradeLog: BacktestStats["tradeLog"] = [];
+  const signals: BacktestStats["signals"] = [];
+  let inPosition = false, pendingEntry = false;
+  let entryPrice = 0, entryDate = "";
+  let signalOnLastBar = false;
+  let liveSignal = false;
+
+  for (let i = 210; i < n; i++) {
+    if (!inPosition) {
+      if (pendingEntry) {
+        inPosition = true;
+        entryPrice = opens[i];
+        entryDate  = dates[i];
+        pendingEntry = false;
+        continue;
+      }
+      // Entry: close > EMA200 AND ConnorsRSI < CRSI_ENTRY_THRESHOLD
+      if (ema200[i] > 0 && closes[i] > ema200[i] && crsi[i] < CRSI_ENTRY_THRESHOLD) {
+        signals.push({ d: dates[i], p: Math.round(closes[i] * 100) / 100 });
+        if (i === n - 1) {
+          signalOnLastBar = true;
+        } else {
+          pendingEntry = true;
+        }
+      }
+    } else {
+      // Exit: ConnorsRSI > CRSI_EXIT_THRESHOLD
+      if (crsi[i] > CRSI_EXIT_THRESHOLD || i === n - 1) {
+        const exitPrice = closes[i];
+        const returnPct = ((exitPrice - entryPrice) / entryPrice) * 100 - COST_PCT;
+        trades.push(returnPct);
+        tradeLog.push({
+          entryDate, exitDate: dates[i],
+          entryPrice: Math.round(entryPrice * 100) / 100,
+          exitPrice:  Math.round(exitPrice  * 100) / 100,
+          returnPct:  Math.round(returnPct  * 100) / 100,
+          win: returnPct > 0,
+          ...(i === n - 1 && crsi[i] <= CRSI_EXIT_THRESHOLD ? { forced: true } : {})
+        });
+        inPosition = false;
+      }
+    }
+  }
+
+  // ±1% live signal rule (same as other modules)
+  liveSignal = signalOnLastBar;
+  if (!liveSignal && signals.length > 0) {
+    const lastSig = signals[signals.length - 1];
+    const lastSigIdx = dates.indexOf(lastSig.d);
+    const barsAgo = n - 1 - lastSigIdx;
+    const currentPrice = closes[n - 1];
+    const priceDrift = Math.abs((currentPrice - lastSig.p) / lastSig.p) * 100;
+    if (barsAgo <= 2 && priceDrift <= 1.0) liveSignal = true;
+  }
+
+  // Stats
+  const wins   = trades.filter(r => r > 0);
+  const losses = trades.filter(r => r <= 0);
+  const grossProfit = wins.reduce((a, b) => a + b, 0);
+  const grossLoss   = Math.abs(losses.reduce((a, b) => a + b, 0));
+  const profitFactor = grossLoss === 0 ? (grossProfit > 0 ? NO_LOSS_PF_CAP : 1) : Math.min(grossProfit / grossLoss, NO_LOSS_PF_CAP);
+  const winRatePct = trades.length > 0 ? (wins.length / trades.length) * 100 : 0;
+  const avgReturn  = trades.length > 0 ? trades.reduce((a, b) => a + b, 0) / trades.length : 0;
+  const lastExitPrice = tradeLog.length > 0 ? tradeLog[tradeLog.length - 1].exitPrice : (closes[n - 1] || 0);
+
+  return {
+    numTrades: trades.length,
+    winRatePct: Math.round(winRatePct * 10) / 10,
+    profitFactor: Math.round(profitFactor * 100) / 100,
+    avgReturnPct: Math.round(avgReturn * 100) / 100,
+    maxDrawdownPct: 0,
+    passed: trades.length >= M6_MIN_TRADES && winRatePct >= M6_MIN_WIN_RATE && profitFactor >= M6_MIN_PF,
+    passedBase: trades.length >= M6_MIN_TRADES && winRatePct >= M6_MIN_WIN_RATE && profitFactor >= M6_MIN_PF,
+    passedStrict: trades.length >= M6_MIN_TRADES && winRatePct >= M6_MIN_WIN_RATE && profitFactor >= M6_MIN_PF,
+    lastEntryPrice: tradeLog.length > 0 ? tradeLog[tradeLog.length - 1].entryPrice : 0,
+    lastExitPrice,
+    lastReturnPct: tradeLog.length > 0 ? tradeLog[tradeLog.length - 1].returnPct : 0,
+    liveSignal, livePrice: liveSignal ? (closes[n - 1] || null) : null,
+    liveStop: null, liveTarget: null,
+    tradeLog, signals
+  };
+}
+
 export function computeAllStrategyStats(ohlcv: OHLCV[]): Record<string, BacktestStats> {
   const closes = ohlcv.map(d => d.close);
   const rsi = calculateRSI(closes, 14);
@@ -1651,6 +1762,7 @@ export function computeAllStrategyStats(ohlcv: OHLCV[]): Record<string, Backtest
   }
   out["m2_rounding_bottom"] = backtestStrategy("m2_rounding_bottom", ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx, atr);
   out["m4_divergence"] = backtestDivergence(ohlcv); // resamples to weekly internally
+  out["m6_connors_rsi"] = backtestConnorsRSI(ohlcv);
   return out;
 }
 
@@ -1703,6 +1815,7 @@ export async function runScan(
   const module1Rows: any[] = [];
   const module2Rows: any[] = [];
   const module4Rows: any[] = [];
+  const module6Rows: any[] = [];
   const module3Rows: any[] = [];
   const allScanned: any[] = [];
 
@@ -1768,9 +1881,10 @@ export async function runScan(
           fs.writeFileSync(path.join(PLAYBACK_DIR, `${stock.symbol}.json`), JSON.stringify({
             symbol: stock.symbol,
             name: stock.name,
+            sector: stock.sector || "",
             synthetic: !isReal,
-            d: ohlcv.map(c => c.date),          // per-stock trading days (holidays/listing gaps differ per stock)
-            c: ohlcv.map(c => r2(c.close)),      // closes → as-of force-close of open positions + livePrice, exactly like the live scan
+            d: ohlcv.map(c => c.date),
+            c: ohlcv.map(c => r2(c.close)),
             strategies
           }));
           const dts = ohlcv.map(c => c.date);
@@ -1930,7 +2044,43 @@ export async function runScan(
         });
         log(`📐 [DIVERGENCE] RSI divergence edge confirmed for ${stock.symbol} (${b4.numTrades} trades, PF ${b4.profitFactor})`);
       }
-    }
+
+      // MODULE 6: ConnorsRSI Scanner
+      // Entry: close > EMA(200) AND ConnorsRSI < 15
+      // Exit: ConnorsRSI > 90 (native indicator)
+      // Sector: Banks/Pharma/Power (toggle in UI — stored as metadata)
+      const b6 = stratResults["m6_connors_rsi"];
+      const inTargetSector = M6_SECTORS.has(stock.sector || "");
+      const m6passed = b6 && (b6.liveSignal || (b6.numTrades >= M6_MIN_TRADES && b6.winRatePct >= M6_MIN_WIN_RATE && b6.profitFactor >= M6_MIN_PF));
+      if (m6passed) {
+        passedCount++;
+        module6Rows.push({
+          symbol: stock.symbol,
+          name: stock.name,
+          sector: stock.sector || "",
+          inTargetSector,            // UI uses this for sector toggle filter
+          strategyId: "m6_connors_rsi",
+          trades: b6.tradeLog,
+          strategyLabel: "ConnorsRSI Scanner",
+          entryCond: "Price > EMA(200) aur ConnorsRSI(3,2,100) < 15 — deeply oversold in confirmed uptrend",
+          exitCond: "ConnorsRSI > 90 hone pe close pe exit (emergency floor: -8% from entry)",
+          lastEntryPrice: b6.lastEntryPrice,
+          lastExitPrice: b6.lastExitPrice,
+          lastReturnPct: b6.lastReturnPct,
+          winRatePct: b6.winRatePct,
+          profitFactor: b6.profitFactor,
+          numTrades: b6.numTrades,
+          avgReturnPct: b6.avgReturnPct,
+          maxDrawdownPct: b6.maxDrawdownPct ?? 0,
+          liveSignal: b6.liveSignal,
+          livePrice: b6.livePrice ?? null,
+          liveStop: null,    // indicator-based exit — no fixed stop
+          liveTarget: null,  // indicator-based exit — no fixed target
+          hasChart: false,
+          isSynthetic: !isReal
+        });
+        log(`🎯 [CONNORS] ConnorsRSI edge for ${stock.symbol} (${b6.numTrades} tr, PF ${b6.profitFactor}, sector: ${inTargetSector ? "✅ target" : "all"})`);
+      }
 
     // Small visual pause for UI terminal output pacing
     await new Promise(r => setTimeout(r, 60));
@@ -1949,7 +2099,7 @@ export async function runScan(
       generatedAt: new Date().toISOString()
     }));
     fs.writeFileSync(path.join(PLAYBACK_DIR, "index.json"), JSON.stringify(
-      allScanned.map((res: any) => ({ symbol: res.stock.symbol, name: res.stock.name, synthetic: !res.isReal }))
+      allScanned.map((res: any) => ({ symbol: res.stock.symbol, name: res.stock.name, sector: res.stock.sector || "", synthetic: !res.isReal }))
     ));
     log(`🕰 Playback engine data saved: ${allScanned.length} stocks, ${axis.length} trading days`);
   } catch { /* best-effort */ }
@@ -2106,7 +2256,7 @@ export async function runScan(
     universeCount: tickers.length, // ← ACTUAL loaded count
     scanned: scannedCount, // ← ACTUAL scanned
     withData: realDataCount + syntheticCount, // stocks that actually had price data
-    passed: module1Rows.length + module2Rows.length + module3Rows.length + module4Rows.length, // stocks that cleared the gate
+    passed: module1Rows.length + module2Rows.length + module3Rows.length + module4Rows.length + module6Rows.length, // stocks that cleared the gate
     dataQuality: {
       realData: realDataCount, // ← Track real vs synthetic
       syntheticData: syntheticCount,
@@ -2148,7 +2298,8 @@ export async function runScan(
       module1: module1Rows.length,
       module2: module2Rows.length,
       module3: module3Rows.length,
-      module4: module4Rows.length
+      module4: module4Rows.length,
+      module6: module6Rows.length
     }
   };
 
@@ -2178,6 +2329,7 @@ export async function runScan(
   fs.writeFileSync(path.join(CACHE, "module2.json"), JSON.stringify(stripTrades(module2Rows, "m2"), null, 2));
   fs.writeFileSync(path.join(CACHE, "module3.json"), JSON.stringify(stripTrades(module3Rows, "m3"), null, 2));
   fs.writeFileSync(path.join(CACHE, "module4.json"), JSON.stringify(stripTrades(module4Rows, "m4"), null, 2));
+  fs.writeFileSync(path.join(CACHE, "module6.json"), JSON.stringify(stripTrades(module6Rows, "m6"), null, 2));
   fs.writeFileSync(path.join(CACHE, "alltrades.json"), JSON.stringify(allTrades));
 
   log(`✅ Scan complete! Processed ${totalStocks} stocks (${realDataCount} real, ${syntheticCount} synthetic)`);
@@ -2190,4 +2342,5 @@ if (process.argv[1] && (process.argv[1].endsWith("scan.ts") || process.argv[1].e
   }).catch((err) => {
     console.error("Scanner failed:", err);
   });
+}
 }

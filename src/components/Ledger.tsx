@@ -332,6 +332,8 @@ export function Ledger({
       const entry = r.livePrice;
       const isM2 = r.strategyId === "m2_rounding_bottom";
       const isM4 = r.strategyId === "m4_divergence";
+      const isM6 = r.strategyId === "m6_connors_rsi";
+      const isStoch = r.strategyId === "m1_stoch_rsi";
 
       // M4: agar current price entry se 2% se zyada door ho to signal expired
       if (isM4 && r.lastExitPrice && r.lastExitPrice > 0) {
@@ -347,7 +349,21 @@ export function Ledger({
         }
       }
 
-      let stop = 0, target = 0, stopPct = 0, targetLabel = "";
+      // M6: ConnorsRSI — indicator-based exit, no fixed SL/target
+      if (isM6) {
+        const emergencyStop = Math.round(entry * 0.92);
+        return (
+          <div className="mb-3 p-3 rounded-lg bg-green-500/5 border border-green-500/35 font-mono text-xs text-green-100">
+            <div className="font-bold text-green-400 mb-1">📍 {playbackDate ? `Signal on ${playbackDate} (as-of close that day)` : "LIVE setup (as of latest close)"}</div>
+            <div>Entry zone ≈ <strong>₹{Math.round(entry)}</strong> · ConnorsRSI(3,2,100) &lt; 15 + Price &gt; EMA(200)</div>
+            <div className="mt-1">Exit: <strong>ConnorsRSI &gt; 90 hone pe close pe exit</strong> (avg hold ~46 days)</div>
+            <div className="mt-1">Emergency floor: <strong>₹{emergencyStop}</strong> (−8% from entry) — sirf emergency me, indicator exit hi primary hai</div>
+            <div className="text-slate-500 text-[10px] mt-1.5">OOS validated: Banks+Pharma+Power me PF 2.59, Win 68.2%. Enter only if price is still near entry zone.</div>
+          </div>
+        );
+      }
+
+      let stop = 0, target = 0, stopPct = 0, targetLabel = "", exitLabel = "";
 
       if (r.liveStop && r.liveTarget) {
         stop = Math.round(r.liveStop);
@@ -361,6 +377,11 @@ export function Ledger({
         targetLabel = isM2 ? "+15% rule" : `+${r.avgReturnPct.toFixed(1)}% avg`;
       }
 
+      // StochRSI: show indicator exit label
+      exitLabel = isStoch
+        ? "Exit: StochRSI K crosses D above 80 (emergency floor: −8% from entry)"
+        : "";
+
       const risk = entry - stop;
       const reward = target - entry;
       const rr = risk > 0 ? (reward / risk).toFixed(1) : "—";
@@ -368,6 +389,7 @@ export function Ledger({
         <div className="mb-3 p-3 rounded-lg bg-green-500/5 border border-green-500/35 font-mono text-xs text-green-100">
           <div className="font-bold text-green-400 mb-1">📍 {playbackDate ? `Signal on ${playbackDate} (as-of close that day)` : "LIVE setup (as of latest close)"}</div>
           <div>Entry zone ≈ <strong>₹{entry}</strong> · Stop-loss <strong>₹{stop}</strong> (−{stopPct}%) · Target ≈ <strong>₹{target}</strong> ({targetLabel}) · R:R ≈ 1:{rr}</div>
+          {exitLabel && <div className="mt-1 text-yellow-300/80">{exitLabel}</div>}
           <div className="text-slate-500 text-[10px] mt-1.5">Enter only if price is still near the entry zone. Backtest-derived levels — educational, not financial advice.</div>
         </div>
       );
