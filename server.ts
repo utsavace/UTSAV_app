@@ -850,6 +850,37 @@ async function start() {
   
   app.listen(PORT, "0.0.0.0", () => console.log(`Edge console → http://localhost:${PORT}`));
   scheduleAutoScan();
+
+  // Production: auto-start scan on boot if cache is missing
+  // This handles Render free tier restarts where ephemeral filesystem wipes cache
+  if (process.env.NODE_ENV === "production") {
+    const cacheDir = path.join(process.cwd(), "public", "cache");
+    const metaFile = path.join(cacheDir, "meta.json");
+    if (!fs.existsSync(metaFile)) {
+      console.log("🔄 Cache missing on startup — auto-starting scan...");
+      setTimeout(() => {
+        if (!scanStatus.isScanning) {
+          scanStatus = {
+            isScanning: true, progress: 0, scanned: 0,
+            currentSymbol: "Auto-scan on startup...", passedCount: 0,
+            logs: ["🚀 Auto-scan triggered: cache was empty on server start"]
+          };
+          runScan((progress, scanned, currentSymbol, passedCount, logLine) => {
+            scanStatus.progress = progress; scanStatus.scanned = scanned;
+            scanStatus.currentSymbol = currentSymbol; scanStatus.passedCount = passedCount;
+            scanStatus.logs.push(logLine);
+            if (scanStatus.logs.length > 80) scanStatus.logs.shift();
+          }).then(() => {
+            scanStatus.isScanning = false; scanStatus.progress = 100;
+            scanStatus.logs.push("🎉 Startup scan complete — dashboard ready.");
+          }).catch((err) => {
+            scanStatus.isScanning = false;
+            scanStatus.logs.push(`❌ Startup scan failed: ${err?.message || err}`);
+          });
+        }
+      }, 3000); // 3s delay so server is fully up before scan starts
+    }
+  }
 }
 
 

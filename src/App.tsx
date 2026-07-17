@@ -350,11 +350,13 @@ export default function App() {
   // Polling loop for active scans
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
+    let failCount = 0;
     if (scanStatus.isScanning) {
       interval = setInterval(() => {
         fetch("/api/scan/status")
           .then(res => res.json())
           .then(data => {
+            failCount = 0; // reset on success
             setScanStatus({
               isScanning: data.isScanning,
               progress: data.progress,
@@ -364,19 +366,28 @@ export default function App() {
               logs: data.logs || []
             });
             if (!data.isScanning && data.progress === 100) {
-              // Reload the freshly-written cache through the validated endpoints
               fetchMeta().then(setMeta).catch(() => {});
               fetchModule(tab).then(setRows).catch(() => {});
-              setAllTradesData(null); // force P&L panel to re-fetch fresh alltrades.json
-              
+              setAllTradesData(null);
               if (publishAfterScan.current) {
                 publishAfterScan.current = false;
-                publishCache(); // auto-commit + push the fresh cache
+                publishCache();
               }
+            }
+            // Scan finished but progress not 100 — server restarted mid-scan
+            if (!data.isScanning && data.progress < 100) {
+              fetchMeta().then(setMeta).catch(() => {});
+              fetchModule(tab).then(setRows).catch(() => {});
             }
           })
           .catch(err => {
+            failCount++;
             console.error("Error polling scan status", err);
+            // After 10 consecutive failures (5 seconds), assume server restarted — stop polling
+            if (failCount >= 10) {
+              setScanStatus(prev => ({ ...prev, isScanning: false, progress: 0 }));
+              fetchMeta().then(setMeta).catch(() => {});
+            }
           });
       }, 500);
     }
@@ -1034,9 +1045,18 @@ export default function App() {
                 </span>
                 <span className="font-bold tracking-tight text-white text-base">High-Fidelity Engine Scanning...</span>
               </div>
-              <span className="font-mono text-xs text-[#8e9ba9] bg-[#212836] px-2.5 py-1 rounded">
-                Scanned: {scanStatus.scanned}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-xs text-[#8e9ba9] bg-[#212836] px-2.5 py-1 rounded">
+                  Scanned: {scanStatus.scanned}
+                </span>
+                <button
+                  onClick={() => setScanStatus(prev => ({ ...prev, isScanning: false }))}
+                  title="Hide overlay — scan continues in background"
+                  style={{ background: "transparent", border: "1px solid #2a3342", color: "#8e9ba9", borderRadius: "6px", padding: "4px 10px", fontSize: "11px", fontFamily: "monospace", cursor: "pointer" }}
+                >
+                  ✕ Hide
+                </button>
+              </div>
             </div>
 
             {/* Progress Panel */}

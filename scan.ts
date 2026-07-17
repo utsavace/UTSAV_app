@@ -471,7 +471,7 @@ export const NO_LOSS_PF_CAP = 10.0;    // cap so 3-trade no-loss runs don't show
 const YAHOO_RANGE = "max";      // full available history so any past date can be selected
 const SYNTHETIC_DAYS = 5000;    // ~20y of trading days for the fallback path
 export const COST_PCT = 0.2;           // round-trip cost + slippage per trade (%) subtracted from every return
-const FETCH_RETRIES = 3;        // Yahoo retry attempts with backoff (rate-limit resilience)
+const FETCH_RETRIES = 2;        // Render free tier: 2 retries enough, faster fallback to synthetic
 export const CUP_WINDOWS = [252, 189, 126]; // rounding-bottom base windows ≈ 12 / 9 / 6 months (longest preferred)
 
 export const STRATEGIES_POOL = [
@@ -1072,7 +1072,7 @@ function parseYahooChart(jsonData: any): OHLCV[] {
 // Each source returns OHLCV[] or null. First successful result wins.
 // This way if Yahoo blocks/rate-limits, Stooq silently takes over.
 
-async function fetchWithTimeout(url: string, headers: Record<string, string> = {}, timeoutMs = 8000): Promise<Response | null> {
+async function fetchWithTimeout(url: string, headers: Record<string, string> = {}, timeoutMs = 5000): Promise<Response | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -1818,112 +1818,96 @@ export async function runScan(
   const module6Rows: any[] = [];
   const module3Rows: any[] = [];
   const allScanned: any[] = [];
+  // strategyCounts updated inline per stock — no need to iterate allScanned again
+  const strategyCounts: Record<string, { passes: number; pfValues: number[] }> = {};
+  for (const s of STRATEGIES_POOL) strategyCounts[s.id] = { passes: 0, pfValues: [] };
+  // m3BestResults: per-stock stratResults for the best global strategy (determined after loop)
+  const m3StockResults: Array<{ stock: any; isReal: boolean; stratResults: Record<string, any> }> = [];
 
   // ✅ FIX #4: Track real vs synthetic data
   let realDataCount = 0;
   let syntheticCount = 0;
 
-  const batchSize = 10;
-  const numSteps = Math.ceil(totalStocks / batchSize);
+  const batchSize = 1;  // Sequential processing — no parallel fetches to avoid memory spikes in AI Studio / Render free tier
 
-  for (let step = 0; step < numSteps; step++) {
-    const startIdx = step * batchSize;
-    const endIdx = Math.min(totalStocks, startIdx + batchSize);
+  for (let step = 0; step < totalStocks; step++) {
+    const stock = tickers[step];
+    currentSymbol = stock.symbol;
+    scannedCount = step + 1;
 
-    // Representative stock for the progress logs = first ticker of THIS batch
-    const repStock = tickers[startIdx];
-    currentSymbol = repStock.symbol;
-    scannedCount = endIdx;
+    log(`🔍 [${step + 1}/${totalStocks}] ${stock.symbol}...`);
 
-    log(`🔍 [Processing] Batch ${step + 1}/${numSteps} - Current representative: ${repStock.symbol}...`);
+    // Fetch + process + write — then immediately discard from memory
+    await (async () => {
+      let ohlcv = await fetchStockData(stock.symbol);
+      let isReal = true;
+      if (!ohlcv) {
+        ohlcv = generateSyntheticHistory(stock.symbol);
+        isReal = false;
+      }
 
-    // Fetch and analyze the batch in parallel (highly optimized!)
-    const batchPromises = [];
-    for (let i = startIdx; i < endIdx; i++) {
-      const stock = tickers[i];
-      batchPromises.push((async () => {
-        let ohlcv = await fetchStockData(stock.symbol);
-        let isReal = true;
-        if (!ohlcv) {
-          ohlcv = generateSyntheticHistory(stock.symbol);
-          isReal = false;
+      const r2 = (x: number) => Math.round(x * 100) / 100;
+
+      // Persist raw candles for Playback engine
+      try {
+        fs.writeFileSync(path.join(OHLCV_DIR, `${stock.symbol}.json`), JSON.stringify({
+          symbol: stock.symbol, name: stock.name, synthetic: !isReal,
+          d: ohlcv.map(c => c.date), o: ohlcv.map(c => r2(c.open)),
+          h: ohlcv.map(c => r2(c.high)), l: ohlcv.map(c => r2(c.low)),
+          c: ohlcv.map(c => r2(c.close)), v: ohlcv.map(c => c.volume)
+        }));
+      } catch { /* best-effort */ }
+
+      const stratResults = computeAllStrategyStats(ohlcv);
+
+      // Persist playback model
+      try {
+        const strategies: Record<string, { trades: TradeRecord[]; signals: BacktestStats["signals"] }> = {};
+        for (const sid of Object.keys(stratResults)) {
+          strategies[sid] = { trades: stratResults[sid].tradeLog, signals: stratResults[sid].signals };
         }
+        fs.writeFileSync(path.join(PLAYBACK_DIR, `${stock.symbol}.json`), JSON.stringify({
+          symbol: stock.symbol, name: stock.name, sector: stock.sector || "",
+          synthetic: !isReal, d: ohlcv.map(c => c.date), c: ohlcv.map(c => r2(c.close)),
+          strategies
+        }));
+        const dts = ohlcv.map(c => c.date);
+        if (isReal && dts.length > axisDates.length) axisDates = dts;
+        if (!isReal && dts.length > axisDatesSynth.length) axisDatesSynth = dts;
+      } catch { /* best-effort */ }
 
-        // Rounding helper shared by BOTH playback persistence blocks below.
-        // (Previously declared inside the first try{} — the second block then threw
-        // ReferenceError and silently skipped writing every playback model file.)
-        const r2 = (x: number) => Math.round(x * 100) / 100;
+      // Track real vs synthetic
+      if (isReal) { realDataCount++; log(`📈 [LIVE] ${stock.symbol} ✓`); }
+      else { syntheticCount++; log(`⚠️ [SYNTHETIC] ${stock.symbol}`); }
 
-        // Persist raw candles for the Playback (time machine) engine — column format keeps files small.
-        try {
-          fs.writeFileSync(path.join(OHLCV_DIR, `${stock.symbol}.json`), JSON.stringify({
-            symbol: stock.symbol,
-            name: stock.name,
-            synthetic: !isReal,
-            d: ohlcv.map(c => c.date),
-            o: ohlcv.map(c => r2(c.open)),
-            h: ohlcv.map(c => r2(c.high)),
-            l: ohlcv.map(c => r2(c.low)),
-            c: ohlcv.map(c => r2(c.close)),
-            v: ohlcv.map(c => c.volume)
-          }));
-        } catch { /* playback data is best-effort; the scan itself must not fail on disk issues */ }
+      // Dynamic Strategy Optimization
+      let bestB1Strat = STRATEGIES_POOL[0];
+      let bestB1Stats = stratResults[bestB1Strat.id];
+      for (let sIdx = 1; sIdx < STRATEGIES_POOL.length; sIdx++) {
+        const strat = STRATEGIES_POOL[sIdx];
+        const b1Stats = stratResults[strat.id];
+        const isBetter = (b1Stats.passed && !bestB1Stats.passed) ||
+          (b1Stats.passed === bestB1Stats.passed && b1Stats.profitFactor > bestB1Stats.profitFactor) ||
+          (b1Stats.passed === bestB1Stats.passed && b1Stats.profitFactor === bestB1Stats.profitFactor && b1Stats.winRatePct > bestB1Stats.winRatePct);
+        if (isBetter) { bestB1Strat = strat; bestB1Stats = b1Stats; }
+      }
 
-        const closes = ohlcv.map(d => d.close);
-        const stratResults = computeAllStrategyStats(ohlcv);
+      const b2 = stratResults["m2_rounding_bottom"];
+      const closes = ohlcv.map(d => d.close);
+      const res = { stock, isReal, stratResults, bestB1Strat, bestB1Stats, b2, closes };
+      allScanned.push({ stock, isReal }); // only store minimal data for index.json
 
-        // Playback model: this stock's complete trade + signal history for ALL strategies.
-        try {
-          const strategies: Record<string, { trades: TradeRecord[]; signals: BacktestStats["signals"] }> = {};
-          for (const sid of Object.keys(stratResults)) {
-            strategies[sid] = { trades: stratResults[sid].tradeLog, signals: stratResults[sid].signals };
-          }
-          fs.writeFileSync(path.join(PLAYBACK_DIR, `${stock.symbol}.json`), JSON.stringify({
-            symbol: stock.symbol,
-            name: stock.name,
-            sector: stock.sector || "",
-            synthetic: !isReal,
-            d: ohlcv.map(c => c.date),
-            c: ohlcv.map(c => r2(c.close)),
-            strategies
-          }));
-          const dts = ohlcv.map(c => c.date);
-          if (isReal && dts.length > axisDates.length) axisDates = dts;
-          if (!isReal && dts.length > axisDatesSynth.length) axisDatesSynth = dts;
-        } catch { /* playback data is best-effort; the scan itself must not fail on disk issues */ }
-
-        // Dynamic Strategy Optimization: Evaluate all 6 systems to find the absolute best fit
-        let bestB1Strat = STRATEGIES_POOL[0];
-        let bestB1Stats = stratResults[bestB1Strat.id];
-
-        for (let sIdx = 1; sIdx < STRATEGIES_POOL.length; sIdx++) {
-          const strat = STRATEGIES_POOL[sIdx];
-          const b1Stats = stratResults[strat.id];
-          
-          // Selection criteria:
-          // 1. Give priority to those that passed the strict gate
-          // 2. Choose the one with the highest Profit Factor
-          // 3. Ties broken by highest Win Rate
-          const isBetter = (b1Stats.passed && !bestB1Stats.passed) ||
-                           (b1Stats.passed === bestB1Stats.passed && b1Stats.profitFactor > bestB1Stats.profitFactor) ||
-                           (b1Stats.passed === bestB1Stats.passed && b1Stats.profitFactor === bestB1Stats.profitFactor && b1Stats.winRatePct > bestB1Stats.winRatePct);
-          if (isBetter) {
-            bestB1Strat = strat;
-            bestB1Stats = b1Stats;
-          }
+      // Update breadth counts inline (replaces post-loop allScanned iteration)
+      for (const sid of Object.keys(stratResults)) {
+        if (sid === "m2_rounding_bottom" || sid === "m4_divergence" || sid === "m6_connors_rsi") continue;
+        const stat = stratResults[sid];
+        if (stat.passed && strategyCounts[sid]) {
+          strategyCounts[sid].passes++;
+          strategyCounts[sid].pfValues.push(stat.profitFactor);
         }
-
-        const b2 = stratResults["m2_rounding_bottom"];
-
-        return { stock, isReal, stratResults, bestB1Strat, bestB1Stats, b2, closes };
-      })());
-    }
-
-    const batchResults = await Promise.all(batchPromises);
-    allScanned.push(...batchResults);
-
-    for (const res of batchResults) {
-      const { stock, isReal, stratResults, bestB1Strat, bestB1Stats, b2, closes } = res;
+      }
+      // Save minimal m3 data for post-loop module3 row building
+      m3StockResults.push({ stock, isReal, stratResults });
 
       // ✅ FIX #2 & #4: Better logging & Count tracking
       if (isReal) {
@@ -2082,9 +2066,17 @@ export async function runScan(
         log(`🎯 [CONNORS] ConnorsRSI edge for ${stock.symbol} (${b6.numTrades} tr, PF ${b6.profitFactor}, sector: ${inTargetSector ? "✅ target" : "all"})`);
       }
 
+    })(); // end async IIFE per stock
+
     // Small visual pause for UI terminal output pacing
-    await new Promise(r => setTimeout(r, 60));
-  }
+    await new Promise(r => setTimeout(r, 30));
+
+    // Progress update
+    if (onProgress) {
+      const pct = Math.min(100, Math.floor(((step + 1) / totalStocks) * 100));
+      onProgress(pct, step + 1, stock.symbol, passedCount, `[${step + 1}/${totalStocks}] ${stock.symbol}`);
+    }
+  } // end per-stock loop
 
   log("📊 Compiling global technical indicators...");
   await new Promise(r => setTimeout(r, 300));
@@ -2120,20 +2112,7 @@ export async function runScan(
   const pnl = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
 
   // Find breadth winner
-  const strategyCounts: Record<string, { passes: number; pfValues: number[] }> = {};
-  for (const s of STRATEGIES_POOL) {
-    strategyCounts[s.id] = { passes: 0, pfValues: [] };
-  }
-  for (const res of allScanned) {
-    for (const sid of Object.keys(res.stratResults)) {
-      if (sid === "m2_rounding_bottom" || sid === "m4_divergence" || sid === "m3_best_overall") continue;
-      const stat = res.stratResults[sid];
-      if (stat.passed) {
-        strategyCounts[sid].passes++;
-        strategyCounts[sid].pfValues.push(stat.profitFactor);
-      }
-    }
-  }
+  // strategyCounts already computed inline per-stock above
 
   let bestSid = STRATEGIES_POOL[0].id;
   let maxPasses = -1;
@@ -2154,7 +2133,7 @@ export async function runScan(
   const bestGlobalStrategyId = bestSid;
 
   // Dynamically populate Module 3 rows with the winner strategy results
-  for (const res of allScanned) {
+  for (const res of m3StockResults) {
     const b3 = res.stratResults[bestGlobalStrategyId];
     if (b3 && b3.passed && b3.numTrades >= STRICT_TRADES && b3.profitFactor >= STRICT_PF) {
       module3Rows.push({
@@ -2238,7 +2217,7 @@ export async function runScan(
 
   // Breadth chart data compiled
   const breadthStats = STRATEGIES_POOL.map(s => {
-    const passers = allScanned.filter(res => res.stratResults[s.id]?.passed);
+    const passers = m3StockResults.filter(res => res.stratResults[s.id]?.passed);
     const passingPfs = passers
       .map(res => res.stratResults[s.id].profitFactor)
       .filter((pf: number) => isFinite(pf) && pf > 0);
@@ -2342,5 +2321,4 @@ if (process.argv[1] && (process.argv[1].endsWith("scan.ts") || process.argv[1].e
   }).catch((err) => {
     console.error("Scanner failed:", err);
   });
-}
 }
