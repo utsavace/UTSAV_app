@@ -1760,7 +1760,6 @@ export function computeAllStrategyStats(ohlcv: OHLCV[]): Record<string, Backtest
   for (const strat of STRATEGIES_POOL) {
     out[strat.id] = backtestStrategy(strat.id, ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx, atr);
   }
-  out["m2_rounding_bottom"] = backtestStrategy("m2_rounding_bottom", ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx, atr);
   out["m4_divergence"] = backtestDivergence(ohlcv); // resamples to weekly internally
   out["m6_connors_rsi"] = backtestConnorsRSI(ohlcv);
   return out;
@@ -1813,7 +1812,6 @@ export async function runScan(
   await new Promise(r => setTimeout(r, 400));
 
   const module1Rows: any[] = [];
-  const module2Rows: any[] = [];
   const module4Rows: any[] = [];
   const module6Rows: any[] = [];
   const module3Rows: any[] = [];
@@ -1828,253 +1826,197 @@ export async function runScan(
   let realDataCount = 0;
   let syntheticCount = 0;
 
-  const batchSize = 15; // Parallel batches of 15 — very stable, avoids timeouts, completes within 1.5 minutes
-  const numSteps = Math.ceil(totalStocks / batchSize);
+  const batchSize = 1;  // Sequential processing — no parallel fetches to avoid memory spikes in AI Studio / Render free tier
 
-  for (let step = 0; step < numSteps; step++) {
-    const startIdx = step * batchSize;
-    const endIdx = Math.min(totalStocks, startIdx + batchSize);
+  for (let step = 0; step < totalStocks; step++) {
+    const stock = tickers[step];
+    currentSymbol = stock.symbol;
+    scannedCount = step + 1;
 
-    log(`🔍 [Processing] Batch ${step + 1}/${numSteps} - Stocks [${startIdx + 1} - ${endIdx}]...`);
+    log(`🔍 [${step + 1}/${totalStocks}] ${stock.symbol}...`);
 
-    const batchPromises = [];
-    for (let i = startIdx; i < endIdx; i++) {
-      const stock = tickers[i];
-      batchPromises.push((async () => {
-        let ohlcv = await fetchStockData(stock.symbol);
-        let isReal = true;
-        if (!ohlcv) {
-          ohlcv = generateSyntheticHistory(stock.symbol);
-          isReal = false;
-        }
+    // Fetch + process + write — then immediately discard from memory
+    await (async () => {
+      let ohlcv = await fetchStockData(stock.symbol);
+      let isReal = true;
+      if (!ohlcv) {
+        ohlcv = generateSyntheticHistory(stock.symbol);
+        isReal = false;
+      }
 
-        const r2 = (x: number) => Math.round(x * 100) / 100;
+      const r2 = (x: number) => Math.round(x * 100) / 100;
 
-        // Persist raw candles for Playback engine
-        try {
-          fs.writeFileSync(path.join(OHLCV_DIR, `${stock.symbol}.json`), JSON.stringify({
-            symbol: stock.symbol, name: stock.name, synthetic: !isReal,
-            d: ohlcv.map(c => c.date), o: ohlcv.map(c => r2(c.open)),
-            h: ohlcv.map(c => r2(c.high)), l: ohlcv.map(c => r2(c.low)),
-            c: ohlcv.map(c => r2(c.close)), v: ohlcv.map(c => c.volume)
-          }));
-        } catch { /* best-effort */ }
+      // Persist raw candles for Playback engine
+      try {
+        fs.writeFileSync(path.join(OHLCV_DIR, `${stock.symbol}.json`), JSON.stringify({
+          symbol: stock.symbol, name: stock.name, synthetic: !isReal,
+          d: ohlcv.map(c => c.date), o: ohlcv.map(c => r2(c.open)),
+          h: ohlcv.map(c => r2(c.high)), l: ohlcv.map(c => r2(c.low)),
+          c: ohlcv.map(c => r2(c.close)), v: ohlcv.map(c => c.volume)
+        }));
+      } catch { /* best-effort */ }
 
-        const stratResults = computeAllStrategyStats(ohlcv);
+      const stratResults = computeAllStrategyStats(ohlcv);
 
-        // Persist playback model
-        try {
-          const strategies: Record<string, { trades: TradeRecord[]; signals: BacktestStats["signals"] }> = {};
-          for (const sid of Object.keys(stratResults)) {
-            strategies[sid] = { trades: stratResults[sid].tradeLog, signals: stratResults[sid].signals };
-          }
-          fs.writeFileSync(path.join(PLAYBACK_DIR, `${stock.symbol}.json`), JSON.stringify({
-            symbol: stock.symbol, name: stock.name, sector: stock.sector || "",
-            synthetic: !isReal, d: ohlcv.map(c => c.date), c: ohlcv.map(c => r2(c.close)),
-            strategies
-          }));
-          const dts = ohlcv.map(c => c.date);
-          if (isReal) {
-            if (dts.length > axisDates.length) axisDates = dts;
-          } else {
-            if (dts.length > axisDatesSynth.length) axisDatesSynth = dts;
-          }
-        } catch { /* best-effort */ }
-
-        // Track real vs synthetic (Single, consolidated counter increment and log)
-        if (isReal) {
-          realDataCount++;
-          log(`📈 [LIVE YAHOO API] ${stock.symbol} ✓`);
-        } else {
-          syntheticCount++;
-          log(`⚠️ [FALLBACK DATA] ${stock.symbol} (synthetic)`);
-        }
-
-        // Dynamic Strategy Optimization
-        let bestB1Strat = STRATEGIES_POOL[0];
-        let bestB1Stats = stratResults[bestB1Strat.id];
-        for (let sIdx = 1; sIdx < STRATEGIES_POOL.length; sIdx++) {
-          const strat = STRATEGIES_POOL[sIdx];
-          const b1Stats = stratResults[strat.id];
-          const isBetter = (b1Stats.passed && !bestB1Stats.passed) ||
-            (b1Stats.passed === bestB1Stats.passed && b1Stats.profitFactor > bestB1Stats.profitFactor) ||
-            (b1Stats.passed === bestB1Stats.passed && b1Stats.profitFactor === bestB1Stats.profitFactor && b1Stats.winRatePct > bestB1Stats.winRatePct);
-          if (isBetter) { bestB1Strat = strat; bestB1Stats = b1Stats; }
-        }
-
-        const b2 = stratResults["m2_rounding_bottom"];
-        const closes = ohlcv.map(d => d.close);
-        allScanned.push({ stock, isReal }); // only store minimal data for index.json
-
-        // Update breadth counts inline
+      // Persist playback model
+      try {
+        const strategies: Record<string, { trades: TradeRecord[]; signals: BacktestStats["signals"] }> = {};
         for (const sid of Object.keys(stratResults)) {
-          if (sid === "m2_rounding_bottom" || sid === "m4_divergence" || sid === "m6_connors_rsi") continue;
-          const stat = stratResults[sid];
-          if (stat.passed && strategyCounts[sid]) {
-            strategyCounts[sid].passes++;
-            strategyCounts[sid].pfValues.push(stat.profitFactor);
-          }
+          strategies[sid] = { trades: stratResults[sid].tradeLog, signals: stratResults[sid].signals };
         }
-        // Save minimal m3 data for post-loop module3 row building
-        m3StockResults.push({ stock, isReal, stratResults });
+        fs.writeFileSync(path.join(PLAYBACK_DIR, `${stock.symbol}.json`), JSON.stringify({
+          symbol: stock.symbol, name: stock.name, sector: stock.sector || "",
+          synthetic: !isReal, d: ohlcv.map(c => c.date), c: ohlcv.map(c => r2(c.close)),
+          strategies
+        }));
+        const dts = ohlcv.map(c => c.date);
+        if (isReal && dts.length > axisDates.length) axisDates = dts;
+        if (!isReal && dts.length > axisDatesSynth.length) axisDatesSynth = dts;
+      } catch { /* best-effort */ }
 
-        if (bestB1Stats.passed && bestB1Stats.numTrades >= STRICT_TRADES && bestB1Stats.profitFactor >= STRICT_PF) {
-          passedCount++;
-          module1Rows.push({
-            symbol: stock.symbol,
-            name: stock.name,
-            strategyId: bestB1Strat.id,
-            trades: bestB1Stats.tradeLog,
-            strategyLabel: bestB1Strat.label,
-            entryCond: bestB1Strat.entry,
-            exitCond: bestB1Strat.exit,
-            lastEntryPrice: bestB1Stats.lastEntryPrice,
-            lastExitPrice: bestB1Stats.lastExitPrice,
-            lastReturnPct: bestB1Stats.lastReturnPct,
-            winRatePct: bestB1Stats.winRatePct,
-            profitFactor: bestB1Stats.profitFactor,
-            numTrades: bestB1Stats.numTrades,
-            avgReturnPct: bestB1Stats.avgReturnPct,
-            maxDrawdownPct: bestB1Stats.maxDrawdownPct,
-            liveSignal: bestB1Stats.liveSignal,
-            livePrice: bestB1Stats.livePrice,
-            liveStop: bestB1Stats.liveStop ?? null,
-            liveTarget: bestB1Stats.liveTarget ?? null,
-            isSynthetic: !isReal
-          });
-          log(`✨ [AI OPTIMIZER PASS] ${stock.symbol} optimized: ${bestB1Strat.label} (PF: ${bestB1Stats.profitFactor}, WR: ${bestB1Stats.winRatePct}%)`);
+      // Track real vs synthetic
+      if (isReal) { realDataCount++; log(`📈 [LIVE] ${stock.symbol} ✓`); }
+      else { syntheticCount++; log(`⚠️ [SYNTHETIC] ${stock.symbol}`); }
+
+      // Dynamic Strategy Optimization
+      let bestB1Strat = STRATEGIES_POOL[0];
+      let bestB1Stats = stratResults[bestB1Strat.id];
+      for (let sIdx = 1; sIdx < STRATEGIES_POOL.length; sIdx++) {
+        const strat = STRATEGIES_POOL[sIdx];
+        const b1Stats = stratResults[strat.id];
+        const isBetter = (b1Stats.passed && !bestB1Stats.passed) ||
+          (b1Stats.passed === bestB1Stats.passed && b1Stats.profitFactor > bestB1Stats.profitFactor) ||
+          (b1Stats.passed === bestB1Stats.passed && b1Stats.profitFactor === bestB1Stats.profitFactor && b1Stats.winRatePct > bestB1Stats.winRatePct);
+        if (isBetter) { bestB1Strat = strat; bestB1Stats = b1Stats; }
+      }
+
+      const closes = ohlcv.map(d => d.close);
+      allScanned.push({ stock, isReal }); // only store minimal data for index.json
+
+      // Update breadth counts inline
+      for (const sid of Object.keys(stratResults)) {
+        if (sid === "m4_divergence" || sid === "m6_connors_rsi") continue;
+        const stat = stratResults[sid];
+        if (stat.passed && strategyCounts[sid]) {
+          strategyCounts[sid].passes++;
+          strategyCounts[sid].pfValues.push(stat.profitFactor);
         }
+      }
+      // Save minimal m3 data for post-loop module3 row building
+      m3StockResults.push({ stock, isReal, stratResults });
 
-        if (b2.passed) {
-          passedCount++;
-          
-          // Extract real cup base details — MOST RECENT cup across all base windows (≈6/9/12m)
-          let cupDepth = 0;
-          let actualDurationMonths = 0;
-          let pivotPrice = 0; // base rim = breakout level (resistance)
+      if (isReal) {
+        realDataCount++;
+        log(`📈 [LIVE YAHOO API] ${stock.symbol} ✓`);
+      } else {
+        syntheticCount++;
+        log(`⚠️ [FALLBACK DATA] ${stock.symbol} (synthetic)`);
+      }
 
-          for (let j = closes.length - 1; j >= CUP_WINDOWS[CUP_WINDOWS.length - 1]; j--) {
-            const cup = detectCup(closes, j);
-            if (cup) {
-              cupDepth = cup.depth;
-              actualDurationMonths = cup.months;
-              pivotPrice = cup.pivot;
-              break; // scanning backwards → first hit IS the latest cup
-            }
-          }
-          if (cupDepth === 0) {
-            const lastT = b2.tradeLog[b2.tradeLog.length - 1];
-            cupDepth = lastT?.depthPct ?? 18;
-            actualDurationMonths = lastT?.durationM ?? 12;
-            pivotPrice = b2.lastEntryPrice || closes[closes.length - 1];
-          }
+      if (bestB1Stats.passed && bestB1Stats.numTrades >= STRICT_TRADES && bestB1Stats.profitFactor >= STRICT_PF) {
+        passedCount++;
+        module1Rows.push({
+          symbol: stock.symbol,
+          name: stock.name,
+          strategyId: bestB1Strat.id,
+          trades: bestB1Stats.tradeLog,
+          strategyLabel: bestB1Strat.label,
+          entryCond: bestB1Strat.entry,
+          exitCond: bestB1Strat.exit,
+          lastEntryPrice: bestB1Stats.lastEntryPrice,
+          lastExitPrice: bestB1Stats.lastExitPrice,
+          lastReturnPct: bestB1Stats.lastReturnPct,
+          winRatePct: bestB1Stats.winRatePct,
+          profitFactor: bestB1Stats.profitFactor,
+          numTrades: bestB1Stats.numTrades,
+          avgReturnPct: bestB1Stats.avgReturnPct,
+          maxDrawdownPct: bestB1Stats.maxDrawdownPct,
+          liveSignal: bestB1Stats.liveSignal,
+          livePrice: bestB1Stats.livePrice,
+          liveStop: bestB1Stats.liveStop ?? null,
+          liveTarget: bestB1Stats.liveTarget ?? null,
+          isSynthetic: !isReal
+        });
+        log(`✨ [RSI/STOCHRSI PASS] ${stock.symbol}: ${bestB1Strat.label} (PF: ${bestB1Stats.profitFactor}, WR: ${bestB1Stats.winRatePct}%)`);
+      }
 
-          const entryRelation = `as price nears the ₹${Math.round(pivotPrice)} breakout pivot (pre-breakout)`;
+      // MODULE 4: RSI Divergence — gate requires min 7 trades & 50% win rate
+      const b4 = stratResults["m4_divergence"];
+      const m4passed = b4 && (b4.liveSignal || (b4.numTrades >= M4_MIN_TRADES && b4.winRatePct >= M4_MIN_WIN_RATE && b4.profitFactor >= M4_MIN_PF));
+      if (m4passed) {
+        passedCount++;
+        module4Rows.push({
+          symbol: stock.symbol,
+          name: stock.name,
+          strategyId: "m4_divergence",
+          trades: b4.tradeLog,
+          strategyLabel: "RSI Divergence (Weekly)",
+          entryCond: "WEEKLY bullish RSI divergence (price lower-low, RSI higher-low from oversold), entry next week's open after pivot confirms",
+          exitCond: "SL 2.5x ATR, target 5x ATR (weekly), ya bearish divergence confirm hone pe exit",
+          lastEntryPrice: b4.lastEntryPrice,
+          lastExitPrice: b4.lastExitPrice,
+          lastReturnPct: b4.lastReturnPct,
+          winRatePct: b4.winRatePct,
+          profitFactor: b4.profitFactor,
+          numTrades: b4.numTrades,
+          avgReturnPct: b4.avgReturnPct,
+          maxDrawdownPct: b4.maxDrawdownPct,
+          liveSignal: b4.liveSignal,
+          livePrice: b4.livePrice,
+          liveStop: b4.liveStop ?? null,
+          liveTarget: b4.liveTarget ?? null,
+          hasChart: true,
+          isSynthetic: !isReal
+        });
+        log(`📐 [DIVERGENCE] RSI divergence edge confirmed for ${stock.symbol} (${b4.numTrades} trades, PF ${b4.profitFactor})`);
+      }
 
-          module2Rows.push({
-            symbol: stock.symbol,
-            name: stock.name,
-            strategyId: "m2_rounding_bottom",
-            trades: b2.tradeLog,
-            strategyLabel: "Rounding Bottom Base",
-            entryCond: `U-shaped consolidation base depth ${cupDepth.toFixed(1)}% over ${actualDurationMonths} months, entry ${entryRelation}`,
-            exitCond: "Exit at +15% target or −5% stop-loss",
-            lastEntryPrice: b2.lastEntryPrice,
-            lastExitPrice: b2.lastExitPrice,
-            lastReturnPct: b2.lastReturnPct,
-            winRatePct: b2.winRatePct,
-            profitFactor: b2.profitFactor,
-            numTrades: b2.numTrades,
-            avgReturnPct: b2.avgReturnPct,
-            maxDrawdownPct: b2.maxDrawdownPct,
-            liveSignal: b2.liveSignal,
-            livePrice: b2.livePrice,
-            isSynthetic: !isReal,
-            patternDepth: cupDepth,
-            patternDuration: actualDurationMonths
-          });
-          log(`🎯 [ROUNDING BOTTOM] Base pattern confirmed for ${stock.symbol} (${actualDurationMonths}m base, depth: ${cupDepth.toFixed(1)}%)`);
-        }
+      // MODULE 6: ConnorsRSI Scanner
+      // Entry: close > EMA(200) AND ConnorsRSI < 15
+      // Exit: ConnorsRSI > 90 (native indicator)
+      // Sector: Banks/Pharma/Power (toggle in UI — stored as metadata)
+      const b6 = stratResults["m6_connors_rsi"];
+      const inTargetSector = M6_SECTORS.has(stock.sector || "");
+      const m6passed = b6 && (b6.liveSignal || (b6.numTrades >= M6_MIN_TRADES && b6.winRatePct >= M6_MIN_WIN_RATE && b6.profitFactor >= M6_MIN_PF));
+      if (m6passed) {
+        passedCount++;
+        module6Rows.push({
+          symbol: stock.symbol,
+          name: stock.name,
+          sector: stock.sector || "",
+          inTargetSector,            // UI uses this for sector toggle filter
+          strategyId: "m6_connors_rsi",
+          trades: b6.tradeLog,
+          strategyLabel: "ConnorsRSI Scanner",
+          entryCond: "Price > EMA(200) aur ConnorsRSI(3,2,100) < 15 — deeply oversold in confirmed uptrend",
+          exitCond: "ConnorsRSI > 90 hone pe close pe exit (emergency floor: -8% from entry)",
+          lastEntryPrice: b6.lastEntryPrice,
+          lastExitPrice: b6.lastExitPrice,
+          lastReturnPct: b6.lastReturnPct,
+          winRatePct: b6.winRatePct,
+          profitFactor: b6.profitFactor,
+          numTrades: b6.numTrades,
+          avgReturnPct: b6.avgReturnPct,
+          maxDrawdownPct: b6.maxDrawdownPct ?? 0,
+          liveSignal: b6.liveSignal,
+          livePrice: b6.livePrice ?? null,
+          liveStop: null,    // indicator-based exit — no fixed stop
+          liveTarget: null,  // indicator-based exit — no fixed target
+          hasChart: false,
+          isSynthetic: !isReal
+        });
+        log(`🎯 [CONNORS] ConnorsRSI edge for ${stock.symbol} (${b6.numTrades} tr, PF ${b6.profitFactor}, sector: ${inTargetSector ? "✅ target" : "all"})`);
+      }
 
-        // MODULE 4: RSI Divergence
-        const b4 = stratResults["m4_divergence"];
-        const m4passed = b4 && (b4.liveSignal || (b4.numTrades >= M4_MIN_TRADES && b4.winRatePct >= M4_MIN_WIN_RATE && b4.profitFactor >= M4_MIN_PF));
-        if (m4passed) {
-          passedCount++;
-          module4Rows.push({
-            symbol: stock.symbol,
-            name: stock.name,
-            strategyId: "m4_divergence",
-            trades: b4.tradeLog,
-            strategyLabel: "RSI Divergence (Weekly)",
-            entryCond: "WEEKLY bullish RSI divergence (price lower-low, RSI higher-low from oversold), entry next week's open after pivot confirms",
-            exitCond: "SL 2.5x ATR, target 5x ATR (weekly), ya bearish divergence confirm hone pe exit",
-            lastEntryPrice: b4.lastEntryPrice,
-            lastExitPrice: b4.lastExitPrice,
-            lastReturnPct: b4.lastReturnPct,
-            winRatePct: b4.winRatePct,
-            profitFactor: b4.profitFactor,
-            numTrades: b4.numTrades,
-            avgReturnPct: b4.avgReturnPct,
-            maxDrawdownPct: b4.maxDrawdownPct,
-            liveSignal: b4.liveSignal,
-            livePrice: b4.livePrice,
-            liveStop: b4.liveStop ?? null,
-            liveTarget: b4.liveTarget ?? null,
-            hasChart: true,
-            isSynthetic: !isReal
-          });
-          log(`📐 [DIVERGENCE] RSI divergence edge confirmed for ${stock.symbol} (${b4.numTrades} trades, PF ${b4.profitFactor})`);
-        }
+    })(); // end async IIFE per stock
 
-        // MODULE 6: ConnorsRSI Scanner
-        const b6 = stratResults["m6_connors_rsi"];
-        const inTargetSector = M6_SECTORS.has(stock.sector || "");
-        const m6passed = b6 && (b6.liveSignal || (b6.numTrades >= M6_MIN_TRADES && b6.winRatePct >= M6_MIN_WIN_RATE && b6.profitFactor >= M6_MIN_PF));
-        if (m6passed) {
-          passedCount++;
-          module6Rows.push({
-            symbol: stock.symbol,
-            name: stock.name,
-            sector: stock.sector || "",
-            inTargetSector,
-            strategyId: "m6_connors_rsi",
-            trades: b6.tradeLog,
-            strategyLabel: "ConnorsRSI Scanner",
-            entryCond: "Price > EMA(200) aur ConnorsRSI(3,2,100) < 15 — deeply oversold in confirmed uptrend",
-            exitCond: "ConnorsRSI > 90 hone pe close pe exit (emergency floor: -8% from entry)",
-            lastEntryPrice: b6.lastEntryPrice,
-            lastExitPrice: b6.lastExitPrice,
-            lastReturnPct: b6.lastReturnPct,
-            winRatePct: b6.winRatePct,
-            profitFactor: b6.profitFactor,
-            numTrades: b6.numTrades,
-            avgReturnPct: b6.avgReturnPct,
-            maxDrawdownPct: b6.maxDrawdownPct ?? 0,
-            liveSignal: b6.liveSignal,
-            livePrice: b6.livePrice ?? null,
-            liveStop: null,
-            liveTarget: null,
-            hasChart: false,
-            isSynthetic: !isReal
-          });
-          log(`🎯 [CONNORS] ConnorsRSI edge for ${stock.symbol} (${b6.numTrades} tr, PF ${b6.profitFactor}, sector: ${inTargetSector ? "✅ target" : "all"})`);
-        }
-      })());
-    }
-
-    // Process all stocks in the current batch concurrently
-    await Promise.all(batchPromises);
-
-    scannedCount = endIdx;
-
-    // Small visual pause between batches
-    await new Promise(r => setTimeout(r, 60));
+    // Small visual pause for UI terminal output pacing
+    await new Promise(r => setTimeout(r, 30));
 
     // Progress update
     if (onProgress) {
-      const pct = Math.min(100, Math.floor((endIdx / totalStocks) * 100));
-      onProgress(pct, endIdx, tickers[endIdx - 1]?.symbol || "", passedCount, `[${endIdx}/${totalStocks}] Batch ${step + 1}/${numSteps} complete`);
+      const pct = Math.min(100, Math.floor(((step + 1) / totalStocks) * 100));
+      onProgress(pct, step + 1, stock.symbol, passedCount, `[${step + 1}/${totalStocks}] ${stock.symbol}`);
     }
   } // end per-stock loop
 
@@ -2161,60 +2103,6 @@ export async function runScan(
     }
   }
 
-  // Research buckets built from PER-TRADE cup metadata (each trade carries the depth &
-  // duration of the base it actually traded), on REAL data only — synthetic fallback
-  // rows would poison a "research" statistic.
-  const depthBuckets = [
-    { range: "12% - 19%", min: 12, max: 19, trades: 0, wins: 0 },
-    { range: "19% - 26%", min: 19, max: 26, trades: 0, wins: 0 },
-    { range: "26% - 33%", min: 26, max: 33.001, trades: 0, wins: 0 } // .001 so exactly-33% doesn't fall between buckets
-  ];
-
-  const durationBuckets = [
-    { range: "≈6 Month Base", min: 0, max: 7.5, trades: 0, wins: 0 },
-    { range: "≈9 Month Base", min: 7.5, max: 10.5, trades: 0, wins: 0 },
-    { range: "≈12 Month Base", min: 10.5, max: 99, trades: 0, wins: 0 }
-  ];
-
-  for (const r of module2Rows) {
-    if (r.isSynthetic) continue;
-    for (const t of r.trades as TradeRecord[]) {
-      const d = t.depthPct ?? r.patternDepth;
-      const m = t.durationM ?? r.patternDuration;
-      if (d === undefined || m === undefined) continue;
-      for (const b of depthBuckets) {
-        if (d >= b.min && d < b.max) {
-          b.trades += 1;
-          if (t.win) b.wins += 1;
-        }
-      }
-      for (const b of durationBuckets) {
-        if (m >= b.min && m < b.max) {
-          b.trades += 1;
-          if (t.win) b.wins += 1;
-        }
-      }
-    }
-  }
-
-  const byDepthBuckets = depthBuckets.map(b => {
-    let wr = b.trades > 0 ? (b.wins / b.trades) * 100 : 0;
-    return {
-      range: b.range,
-      trades: b.trades,
-      winRatePct: parseFloat(wr.toFixed(1))
-    };
-  });
-
-  const byDurationBuckets = durationBuckets.map(b => {
-    let wr = b.trades > 0 ? (b.wins / b.trades) * 100 : 0;
-    return {
-      range: b.range,
-      trades: b.trades,
-      winRatePct: parseFloat(wr.toFixed(1))
-    };
-  });
-
   // Breadth chart data compiled
   const breadthStats = STRATEGIES_POOL.map(s => {
     const passers = m3StockResults.filter(res => res.stratResults[s.id]?.passed);
@@ -2235,7 +2123,7 @@ export async function runScan(
     universeCount: tickers.length, // ← ACTUAL loaded count
     scanned: scannedCount, // ← ACTUAL scanned
     withData: realDataCount + syntheticCount, // stocks that actually had price data
-    passed: module1Rows.length + module2Rows.length + module3Rows.length + module4Rows.length + module6Rows.filter((r: any) => r.liveSignal).length, // stocks that cleared the gate (M6 = live signals only)
+    passed: module1Rows.length + module3Rows.length + module4Rows.length + module6Rows.filter((r: any) => r.liveSignal).length, // stocks that cleared the gate (M6 = live signals only)
     dataQuality: {
       realData: realDataCount, // ← Track real vs synthetic
       syntheticData: syntheticCount,
@@ -2262,24 +2150,10 @@ export async function runScan(
       gatePasses: maxPasses, // same metric as the breadth chart → never contradicts it
       breadth: breadthStats.sort((a, b) => b.gatePasses - a.gatePasses)
     },
-    roundingBottomConditions: {
-      totalTrades: module2Rows.reduce((sum, r) => sum + r.numTrades, 0),
-      byDepth: {
-        label: "Cup Base Depth (Max Drawdown in Base)",
-        buckets: byDepthBuckets
-      },
-      byDuration: {
-        label: "Consolidation Base Duration",
-        buckets: byDurationBuckets
-      }
-    },
     counts: {
       module1: module1Rows.length,
-      module2: module2Rows.length,
       module3: module3Rows.length,
       module4: module4Rows.length,
-      // M6 has strong historical edge → many stocks pass the gate. Report LIVE-signal
-      // count so the "Passed Gates" total reflects actionable setups, not the whole universe.
       module6: module6Rows.filter((r: any) => r.liveSignal).length
     }
   };
@@ -2307,7 +2181,6 @@ export async function runScan(
 
   fs.writeFileSync(path.join(CACHE, "meta.json"), JSON.stringify(metaData, null, 2));
   fs.writeFileSync(path.join(CACHE, "module1.json"), JSON.stringify(stripTrades(module1Rows, "m1"), null, 2));
-  fs.writeFileSync(path.join(CACHE, "module2.json"), JSON.stringify(stripTrades(module2Rows, "m2"), null, 2));
   fs.writeFileSync(path.join(CACHE, "module3.json"), JSON.stringify(stripTrades(module3Rows, "m3"), null, 2));
   fs.writeFileSync(path.join(CACHE, "module4.json"), JSON.stringify(stripTrades(module4Rows, "m4"), null, 2));
   fs.writeFileSync(path.join(CACHE, "module6.json"), JSON.stringify(stripTrades(module6Rows, "m6"), null, 2));

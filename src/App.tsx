@@ -26,8 +26,7 @@ interface Meta {
     gatePasses: number;
     breadth: { label: string; gatePasses: number; medianPF: number }[];
   };
-  roundingBottomConditions?: { totalTrades: number; byDepth: Bucketed; byDuration: Bucketed };
-  counts?: { module1: number; module2: number; module3: number; module4: number; module6: number };
+  counts?: { module1: number; module3: number; module4: number; module6: number };
   passed?: number;
 }
 
@@ -37,21 +36,19 @@ interface Bucketed {
 }
 
 const TABS = [
-  { n: 1, key: "opt", label: "AI Strategy Optimizer" },
-  { n: 2, key: "rb", label: "Rounding Bottom" },
-  { n: 3, key: "best", label: "Best Overall Edge" },
-  { n: 4, key: "div", label: "Divergence Scanner" },
+  { n: 1, key: "opt", label: "RSI & StochRSI Scanner" },
+  { n: 3, key: "best", label: "Universe Best Edge" },
+  { n: 4, key: "div", label: "Weekly RSI Divergence" },
   { n: 5, key: "journal", label: "My Trades" },
-  { n: 6, key: "connors_rsi", label: "ConnorsRSI" },
+  { n: 6, key: "connors_rsi", label: "ConnorsRSI Oversold" },
 ] as const;
 
 const DESC: Record<number, string> = {
-  1: "Analyzes each stock to evaluate and select its highest-performing backtest strategy (RSI, MACD, EMA, Bollinger, and ADX combinations) using a full-history daily single-pass evaluation.",
-  2: "Detects rounding bottom (U-shaped) consolidation bases (12-33% cup depth) on full-history charts. Confirms pattern parameters, monitors breakout structures, and tracks precise entry and exit statistics.",
-  3: "Identifies the single high-probability technical strategy that registers the greatest number of breadth passes across the entire Nifty 500 universe to maximize robustness.",
-  4: "Detects RSI (14) bullish divergences (price lower-low, RSI higher-low from oversold) on daily candles. Triggers entries on pivot confirmation with structure-based stop-losses and 2R targets, viewable via stacked visual chart panels.",
-  5: "Your personal trade journal — tick a trade you're taking, and it auto-tracks whether the stop-loss or target gets hit on real daily data, then helps you review and learn from every outcome.",
-  6: "ConnorsRSI(3,2,100) oversold scanner — flags stocks trading above EMA(200) where ConnorsRSI drops below 15 (deeply oversold in confirmed uptrend). Validated OOS: Banks+Pharma+Power filter → PF 2.59, Win 68.2%. Exit when ConnorsRSI > 90.",
+  1: "Do strategies — RSI Extreme Mean Reversion (RSI<25 + bullish engulfing, exit RSI>50) aur Stochastic RSI Trend Filter (StochRSI K crosses D below 20 + ADX>25, exit K crosses D above 80). Har stock ke liye dono me se best wali automatically choose hoti hai.",
+  3: "Poore Nifty-500 universe me jo ek strategy sabse zyada stocks pass karti hai — wohi sirf ek strategy sab eligible stocks pe apply karta hai. Abhi Universe winner: Stochastic RSI Trend Filter.",
+  4: "Weekly chart pe RSI bullish divergence dhundhta hai — price lower-low banaata hai par RSI higher-low banaata hai oversold zone se. Entry next week open pe, exit 2.5×ATR stop-loss ya 5×ATR target.",
+  5: "Tumhara personal trade journal — jis stock ka trade lena ho usse yahan save karo. App rooz check karta hai ki exit signal aaya ya nahi aur status dikhata hai: Holding ✅ ya EXIT ⚠️.",
+  6: "ConnorsRSI(3,2,100) = 3 indicators ka average (RSI-3, Streak RSI-2, PercentRank-100). Entry jab price EMA(200) ke upar ho aur ConnorsRSI 15 se neeche aaye (deeply oversold in uptrend). Exit jab ConnorsRSI 90 se upar jaaye. OOS validated: PF 2.59, Win 68%.",
 };
 
 export default function App() {
@@ -467,7 +464,6 @@ export default function App() {
   const needsScan = meta?.needsScan && !pbOn; // playback has its own data source
   const effCounts = pbOn ? pbSnap?.counts : meta?.counts;
   const effModule3 = pbOn ? pbSnap?.module3Meta : meta?.module3;
-  const effRB = pbOn ? pbSnap?.roundingBottomConditions : meta?.roundingBottomConditions;
   const sourceRowsLen = pbOn ? ((pbSnap?.["module" + tab] as LedgerRow[] | undefined)?.length ?? 0) : rows.length;
   const pbIdx = pbOn && pbDate ? pbAxis.indexOf(pbDate) : -1;
 
@@ -619,62 +615,36 @@ export default function App() {
           <div className="stat-card highlights">
             <span className="stat-label">Passed Gates</span>
             <span className="stat-value text-gold">
-              {pbOn ? ((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) : (meta.passed ?? ((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)))} <span className="stat-value-sub">Total</span>
+              {pbOn ? ((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) : (meta.passed ?? ((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)))} <span className="stat-value-sub">Total</span>
             </span>
             <div className="stat-split-bar flex h-2 rounded-full overflow-hidden mt-1.5">
               <span
                 className="stat-split-1 bg-amber-500"
                 style={{
-                  width: `${
-                    ((effCounts?.module1 || 0) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) *
-                    100
-                  }%`,
-                }}
-              />
-              <span
-                className="stat-split-2 bg-blue-500"
-                style={{
-                  width: `${
-                    ((effCounts?.module2 || 0) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) *
-                    100
-                  }%`,
+                  width: `${((effCounts?.module1 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) * 100}%`,
                 }}
               />
               <span
                 className="stat-split-3 bg-purple-500"
                 style={{
-                  width: `${
-                    ((effCounts?.module3 || 0) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) *
-                    100
-                  }%`,
+                  width: `${((effCounts?.module3 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) * 100}%`,
                 }}
               />
               <span
                 className="stat-split-4 bg-emerald-500"
                 style={{
-                  width: `${
-                    ((effCounts?.module4 || 0) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) *
-                    100
-                  }%`,
+                  width: `${((effCounts?.module4 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) * 100}%`,
                 }}
               />
               <div
                 className="stat-split-4 bg-cyan-400"
                 style={{
-                  width: `${
-                    ((effCounts?.module6 || 0) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) *
-                    100
-                  }%`,
+                  width: `${((effCounts?.module6 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) * 100}%`,
                 }}
               />
             </div>
             <span className="stat-sub text-xs">
-              M1: {effCounts?.module1 ?? 0} · M2: {effCounts?.module2 ?? 0} · M3: {effCounts?.module3 ?? 0} · M4: {effCounts?.module4 ?? 0} · M6: {effCounts?.module6 ?? 0}
+              RSI/StochRSI: {effCounts?.module1 ?? 0} · Universe: {effCounts?.module3 ?? 0} · Divergence: {effCounts?.module4 ?? 0} · ConnorsRSI: {effCounts?.module6 ?? 0}
             </span>
           </div>
           <div className="stat-card">
@@ -757,16 +727,6 @@ export default function App() {
                   <span className="toggle-dot" />
                   LIVE Signals Only
                 </button>
-                {tab === 2 && (
-                  <button
-                    className={`toggle-filter-btn ${m2Strict ? "active" : ""}`}
-                    onClick={() => setM2Strict(!m2Strict)}
-                    title="Highlight rounding-bottom rows that also meet the strict standard: 15+ trades & PF >= 2.5"
-                  >
-                    <span className="toggle-dot" />
-                    Strict (15 / PF 2.5)
-                  </button>
-                )}
                 {tab === 4 && (
                   <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
@@ -996,7 +956,7 @@ export default function App() {
             sortAsc={sortAsc}
             onSort={handleSort}
             historyStart={historyStart}
-            strictHighlight={tab === 2 && m2Strict}
+            strictHighlight={false}
             playbackDate={pbOn ? pbDate : null}
             onTradeTaken={() => (pbOn ? (setPbJournalCount((c) => (c ?? 0) + 1), setPbOpenCount((c) => c + 1)) : setJournalCount((c) => (c ?? 0) + 1))}
             onOpenChart={(symbol, name) => {
@@ -1036,12 +996,6 @@ export default function App() {
         )}
 
         {/* Module 2 condition mining */}
-        {!needsScan && tab === 2 && effRB && (pbOn ? !!pbSnap : !loading) && (
-          <div className="cards">
-            <ConditionCard data={effRB.byDepth} />
-            <ConditionCard data={effRB.byDuration} />
-          </div>
-        )}
       </section>
 
       {/* Real-time Scan Terminal overlay */}

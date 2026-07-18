@@ -140,8 +140,8 @@ function validateCache(): { valid: boolean; reason?: string } {
   const strictT = g.strict?.minOosTrades ?? baseT;
   const strictPF = g.strict?.minProfitFactor ?? basePF;
 
-  for (const n of ["1", "2", "3", "4", "6"]) {
-    const isStrictModule = n !== "2" && n !== "4" && n !== "6";
+  for (const n of ["1", "3", "4", "6"]) {
+    const isStrictModule = n !== "4" && n !== "6";
     const minT = n === "4" ? 7 : n === "6" ? M6_MIN_TRADES : isStrictModule ? strictT : baseT;
     const minPF = n === "4" ? 1.2 : n === "6" ? M6_MIN_PF : isStrictModule ? strictPF : basePF;
     const minWRCheck = n === "4" ? 60 : n === "6" ? M6_MIN_WIN_RATE : minWR;
@@ -174,7 +174,7 @@ app.get("/api/meta", (_req, res) => {
 
 app.get("/api/module/:n", (req, res) => {
   const n = req.params.n;
-  if (!["1", "2", "3", "4", "6"].includes(n)) return res.status(400).json({ error: "module must be 1, 2, 3, 4 or 6" });
+  if (!["1", "3", "4", "6"].includes(n)) return res.status(400).json({ error: "module must be 1, 3, 4 or 6" });
   if (!validateCache().valid) return res.json({ needsScan: true, stale: true, rows: [] });
   const data = readCache(`module${n}.json`);
   if (data === null) return res.json({ needsScan: true, rows: [] });
@@ -330,6 +330,120 @@ app.post("/api/trades/delete", (req, res) => {
   if (next.length === trades.length) return res.status(404).json({ ok: false, error: "trade nahi mila" });
   writeTrades(next);
   res.json({ ok: true });
+});
+
+// Exit signal checker — open trades ke liye indicator-based exit signal check karo
+// Uses playback data (pre-computed signals) to check if exit condition triggered today
+app.get("/api/trades/exit-signals", async (_req, res) => {
+  try {
+    const trades = readTrades().filter((t: any) => t.status === "OPEN");
+    const results: Record<string, { signal: boolean; reason: string; crsi?: number; stochK?: number; rsi?: number }> = {};
+
+    const PLAYBACK_DIR = path.join(process.cwd(), "data", "playback");
+
+    for (const t of trades) {
+      const sid = t.strategyId || "";
+      const sym = t.symbol;
+      const pbFile = path.join(PLAYBACK_DIR, `${sym}.json`);
+
+      if (!fs.existsSync(pbFile)) {
+        results[t.id] = { signal: false, reason: "Data loading..." };
+        continue;
+      }
+
+      try {
+        const pb = JSON.parse(fs.readFileSync(pbFile, "utf-8"));
+        const closes: number[] = pb.c || [];
+        const dates: string[] = pb.d || [];
+        const n = closes.length;
+        if (n < 20) { results[t.id] = { signal: false, reason: "Insufficient data" }; continue; }
+
+        // RSI Mean Reversion: exit when RSI > 50
+        if (sid === "m1_rsi_mean_rev") {
+          const rsi = calculateRSI(closes, 14);
+          const latestRsi = Math.round(rsi[n - 1] * 10) / 10;
+          results[t.id] = {
+            signal: latestRsi > 50,
+            reason: latestRsi > 50
+              ? `⚠️ EXIT SIGNAL — RSI ${latestRsi} crossed above 50`
+              : `✅ Holding — RSI ${latestRsi} (exit when > 50)`,
+            rsi: latestRsi
+          };
+        }
+        // StochRSI: exit when K crosses D above 80
+        else if (sid === "m1_stoch_rsi") {
+          const strats = pb.strategies?.["m1_stoch_rsi"];
+          const sigs = strats?.signals || [];
+          // Check latest signal from stored data — if most recent is within 3 bars and price near signal
+          const latestRsi = calculateRSI(closes, 14);
+          // Simple check: compute StochRSI on latest closes
+          const rsi14 = latestRsi;
+          const sp = 14; const kp = 3; const dp = 3;
+          const k = new Array(n).fill(50);
+          for (let i = sp - 1; i < n; i++) {
+            const sl = rsi14.slice(i - sp + 1, i + 1);
+            const lo = Math.min(...sl); const hi = Math.max(...sl);
+            k[i] = hi > lo ? 100 * (rsi14[i] - lo) / (hi - lo) : 50;
+          }
+          const sk = new Array(n).fill(0);
+          for (let i = kp - 1; i < n; i++) sk[i] = k.slice(i - kp + 1, i + 1).reduce((a: number, b: number) => a + b, 0) / kp;
+          const d = new Array(n).fill(0);
+          for (let i = dp - 1; i < n; i++) d[i] = sk.slice(i - dp + 1, i + 1).reduce((a: number, b: number) => a + b, 0) / dp;
+          const kNow = Math.round(sk[n - 1] * 10) / 10;
+          const dNow = Math.round(d[n - 1] * 10) / 10;
+          const kPrev = sk[n - 2]; const dPrev = d[n - 2];
+          const crossed = kNow > dNow && kPrev <= dPrev && kNow > 80;
+          const above80 = kNow > 80;
+          results[t.id] = {
+            signal: crossed || above80,
+            reason: crossed
+              ? `⚠️ EXIT SIGNAL — StochRSI K (${kNow}) crossed D (${dNow}) above 80`
+              : above80
+              ? `⚠️ EXIT SIGNAL — StochRSI K ${kNow} above 80 (watch for D cross)`
+              : `✅ Holding — StochRSI K ${kNow} / D ${dNow} (exit when K crosses D above 80)`,
+            stochK: kNow
+          };
+        }
+        // ConnorsRSI: exit when CRSI > 90
+        else if (sid === "m6_connors_rsi") {
+          const crsiResult = backtestConnorsRSI(
+            dates.map((date, i) => ({ date, open: closes[i], high: closes[i], low: closes[i], close: closes[i], volume: 0 }))
+          );
+          // Recompute CRSI directly on latest bar
+          const rsi3 = calculateRSI(closes, 3);
+          const streak = new Array(n).fill(0);
+          for (let i = 1; i < n; i++) {
+            if (closes[i] > closes[i - 1]) streak[i] = Math.max(streak[i - 1], 0) + 1;
+            else if (closes[i] < closes[i - 1]) streak[i] = Math.min(streak[i - 1], 0) - 1;
+          }
+          const minStr = Math.min(...streak);
+          const strPos = streak.map((s: number) => s - minStr + 1);
+          const rsiStr = calculateRSI(strPos, 2);
+          const ret = new Array(n).fill(0);
+          for (let i = 1; i < n; i++) ret[i] = closes[i - 1] > 0 ? (closes[i] - closes[i - 1]) / closes[i - 1] * 100 : 0;
+          const pr = new Array(n).fill(50);
+          for (let i = 100; i < n; i++) pr[i] = ret.slice(i - 100, i).filter((r: number) => r < ret[i]).length;
+          const crsi = (rsi3[n - 1] + rsiStr[n - 1] + pr[n - 1]) / 3;
+          const crsiRounded = Math.round(crsi * 10) / 10;
+          results[t.id] = {
+            signal: crsiRounded > 90,
+            reason: crsiRounded > 90
+              ? `⚠️ EXIT SIGNAL — ConnorsRSI ${crsiRounded} crossed above 90`
+              : `✅ Holding — ConnorsRSI ${crsiRounded} (exit when > 90)`,
+            crsi: crsiRounded
+          };
+        }
+        else {
+          results[t.id] = { signal: false, reason: `✅ Holding (${sid || "manual strategy"})` };
+        }
+      } catch {
+        results[t.id] = { signal: false, reason: "Checking..." };
+      }
+    }
+    res.json({ ok: true, signals: results });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err) });
+  }
 });
 
 // Gemini AI review — ek trade ka (id bhejo) ya pura journal ka (id mat bhejo)
@@ -535,7 +649,6 @@ app.get("/api/playback/snapshot", (req, res) => {
   });
 
   const module1Rows: any[] = [];
-  const module2Rows: any[] = [];
   const module4Rows: any[] = [];
   const module6Rows: any[] = [];
   const module3Rows: any[] = [];
@@ -565,22 +678,6 @@ app.get("/api/playback/snapshot", (req, res) => {
     if (best.passedStrict) {
       const live = findLiveSignal(st.strategies[bestId].signals, st.symbol, D);
       module1Rows.push(mkRow(st, bestId, best, live, { fields: { liveStop: live?.stop ?? null, liveTarget: live?.tgt ?? null } }));
-    }
-
-    // Module 2 as-of D
-    const m2 = results["m2_rounding_bottom"];
-    if (m2 && m2.passedBase) {
-      const live = findLiveSignal(st.strategies["m2_rounding_bottom"].signals, st.symbol, D);
-      const lastT = m2.closed[m2.closed.length - 1];
-      const dp = live?.dp ?? lastT?.depthPct ?? 18;
-      const dm = live?.dm ?? lastT?.durationM ?? 12;
-      const pivotTxt = live ? ` near the ₹${Math.round(live.p)} breakout zone` : "";
-      module2Rows.push(mkRow(st, "m2_rounding_bottom", m2, live, {
-        strategyLabel: "Rounding Bottom Base",
-        entryCond: `U-shaped consolidation base depth ${Number(dp).toFixed(1)}% over ${dm} months, pre-breakout entry${pivotTxt}`,
-        exitCond: "Exit at +15% target or −5% stop-loss",
-        fields: { patternDepth: dp, patternDuration: dm }
-      }));
     }
 
     // Module 4: RSI Divergence — relaxed gate (weekly cadence, avg ~2 trades/stock)
@@ -631,49 +728,18 @@ app.get("/api/playback/snapshot", (req, res) => {
     }
   }
 
-  // Module 2 research buckets as-of D (real data, per-trade cup metadata)
-  const depthBuckets = [
-    { range: "12% - 19%", min: 12, max: 19, trades: 0, wins: 0 },
-    { range: "19% - 26%", min: 19, max: 26, trades: 0, wins: 0 },
-    { range: "26% - 33%", min: 26, max: 33.001, trades: 0, wins: 0 }
-  ];
-  const durationBuckets = [
-    { range: "≈6 Month Base", min: 0, max: 7.5, trades: 0, wins: 0 },
-    { range: "≈9 Month Base", min: 7.5, max: 10.5, trades: 0, wins: 0 },
-    { range: "≈12 Month Base", min: 10.5, max: 99, trades: 0, wins: 0 }
-  ];
-  for (const r of module2Rows) {
-    if (r.isSynthetic) continue;
-    for (const t of r.trades) {
-      const d = t.depthPct ?? r.patternDepth, m = t.durationM ?? r.patternDuration;
-      if (d === undefined || m === undefined) continue;
-      for (const b of depthBuckets) if (d >= b.min && d < b.max) { b.trades++; if (t.win) b.wins++; }
-      for (const b of durationBuckets) if (m >= b.min && m < b.max) { b.trades++; if (t.win) b.wins++; }
-    }
-  }
-  const finishBuckets = (bs: any[], label: string) => ({
-    label,
-    buckets: bs.map((b) => ({ range: b.range, trades: b.trades, winRatePct: b.trades ? Math.round((100 * b.wins) / b.trades) : 0 }))
-  });
-
-  const liveCount = module1Rows.filter((r) => r.liveSignal).length + module2Rows.filter((r) => r.liveSignal).length + module3Rows.filter((r) => r.liveSignal).length + module4Rows.filter((r) => r.liveSignal).length + module6Rows.filter((r) => r.liveSignal).length;
+  const liveCount = module1Rows.filter((r) => r.liveSignal).length + module3Rows.filter((r) => r.liveSignal).length + module4Rows.filter((r) => r.liveSignal).length + module6Rows.filter((r) => r.liveSignal).length;
 
   res.json({
     ok: true,
     date: D,
-    counts: { module1: module1Rows.length, module2: module2Rows.length, module3: module3Rows.length, module4: module4Rows.length, module6: module6Rows.filter((r) => r.liveSignal).length },
+    counts: { module1: module1Rows.length, module3: module3Rows.length, module4: module4Rows.length, module6: module6Rows.filter((r) => r.liveSignal).length },
     liveCount,
     module1: module1Rows,
-    module2: module2Rows,
     module3: module3Rows,
     module4: module4Rows,
     module6: module6Rows,
-    module3Meta: { chosenStrategyLabel: winner.label, gatePasses: winner.gatePasses, breadth: breadth.map(({ id, ...rest }) => rest) },
-    roundingBottomConditions: {
-      totalTrades: module2Rows.reduce((s, r) => s + r.numTrades, 0),
-      byDepth: finishBuckets(depthBuckets, "Cup base depth (max drawdown in base)"),
-      byDuration: finishBuckets(durationBuckets, "Consolidation base duration")
-    }
+    module3Meta: { chosenStrategyLabel: winner.label, gatePasses: winner.gatePasses, breadth: breadth.map(({ id, ...rest }) => rest) }
   });
 });
 

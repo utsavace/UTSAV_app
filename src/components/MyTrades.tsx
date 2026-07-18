@@ -47,10 +47,20 @@ export function MyTrades({ onCountChange, mode = "live", asOfDate }: { onCountCh
   const [overallReview, setOverallReview] = useState("");
   const [reviewing, setReviewing] = useState<string | null>(null); // trade id or "ALL"
   const [expandedReview, setExpandedReview] = useState<string | null>(null);
+  const [exitSignals, setExitSignals] = useState<Record<string, { signal: boolean; reason: string }>>({});
 
   const setAll = (list: JournalTrade[]) => {
     setTrades(list);
     if (onCountChange) onCountChange(list.length);
+  };
+
+  const fetchExitSignals = async () => {
+    if (isPb) return; // playback me live signals nahi check karte
+    try {
+      const r = await fetch("/api/trades/exit-signals");
+      const d = await r.json();
+      if (d.ok) setExitSignals(d.signals || {});
+    } catch { /* best-effort */ }
   };
 
   const load = async () => {
@@ -58,6 +68,7 @@ export function MyTrades({ onCountChange, mode = "live", asOfDate }: { onCountCh
       const r = await fetch(`${base}?t=${Date.now()}${isPb && asOfDate ? `&asOf=${asOfDate}` : ""}`);
       const d = await r.json();
       setAll(Array.isArray(d.trades) ? d.trades : []);
+      if (!isPb) fetchExitSignals();
     } catch {
       setMsg("❌ Journal load nahi hua — server chal raha hai?");
     } finally {
@@ -183,6 +194,11 @@ export function MyTrades({ onCountChange, mode = "live", asOfDate }: { onCountCh
         <button className="toggle-filter-btn" onClick={() => checkPrices(false)} disabled={checking} style={{ opacity: checking ? 0.6 : 1 }}>
           {checking ? "⏳ Checking…" : "🔄 Check SL / Target now"}
         </button>
+        {!isPb && (
+          <button className="toggle-filter-btn" onClick={fetchExitSignals} style={{ marginLeft: "8px" }}>
+            🔔 Refresh Exit Signals
+          </button>
+        )}
         {isPb && (
           <button
             className="toggle-filter-btn"
@@ -227,6 +243,18 @@ export function MyTrades({ onCountChange, mode = "live", asOfDate }: { onCountCh
                     <td style={td}>
                       <strong>{t.symbol.replace(".NS", "")}</strong>
                       {(t.status as string) === "PENDING" && <span style={{ marginLeft: "6px", fontSize: "10px", color: "#a78bfa", border: "1px solid rgba(167,139,250,0.4)", borderRadius: "4px", padding: "1px 5px" }}>PENDING</span>}
+                      {/* Exit signal badge */}
+                      {exitSignals[t.id] && (
+                        <div style={{
+                          marginTop: "4px", fontSize: "10.5px", fontFamily: "monospace",
+                          color: exitSignals[t.id].signal ? "#fbbf24" : "#22c55e",
+                          background: exitSignals[t.id].signal ? "rgba(251,191,36,0.10)" : "rgba(34,197,94,0.08)",
+                          border: `1px solid ${exitSignals[t.id].signal ? "rgba(251,191,36,0.4)" : "rgba(34,197,94,0.25)"}`,
+                          borderRadius: "5px", padding: "2px 6px", lineHeight: "1.5"
+                        }}>
+                          {exitSignals[t.id].reason}
+                        </div>
+                      )}
                     </td>
                     <td style={{ ...td, fontFamily: "inherit", fontSize: "11.5px", color: "#8e9ba9" }}>{t.strategyLabel || "—"}</td>
                     <td style={td}>{(t.status as string) === "PENDING" ? "agla session" : t.entryDate}</td>
