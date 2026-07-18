@@ -174,7 +174,7 @@ app.get("/api/meta", (_req, res) => {
 
 app.get("/api/module/:n", (req, res) => {
   const n = req.params.n;
-  if (!["1", "2", "3", "4"].includes(n)) return res.status(400).json({ error: "module must be 1, 2, 3 or 4" });
+  if (!["1", "2", "3", "4", "6"].includes(n)) return res.status(400).json({ error: "module must be 1, 2, 3, 4 or 6" });
   if (!validateCache().valid) return res.json({ needsScan: true, stale: true, rows: [] });
   const data = readCache(`module${n}.json`);
   if (data === null) return res.json({ needsScan: true, rows: [] });
@@ -661,7 +661,7 @@ app.get("/api/playback/snapshot", (req, res) => {
   res.json({
     ok: true,
     date: D,
-    counts: { module1: module1Rows.length, module2: module2Rows.length, module3: module3Rows.length, module4: module4Rows.length, module6: module6Rows.length },
+    counts: { module1: module1Rows.length, module2: module2Rows.length, module3: module3Rows.length, module4: module4Rows.length, module6: module6Rows.filter((r) => r.liveSignal).length },
     liveCount,
     module1: module1Rows,
     module2: module2Rows,

@@ -399,7 +399,9 @@ export default function App() {
   // Reset filter/sort state when changing tabs
   useEffect(() => {
     setSearchQuery("");
-    setLiveOnly(false);
+    // M6 (ConnorsRSI) has a strong historical edge so many stocks pass the gate —
+    // default to LIVE-only so users see actionable signals, not the whole passing universe.
+    setLiveOnly(tab === 6);
     setSortField(null);
     setSortAsc(false);
   }, [tab]);
@@ -604,7 +606,7 @@ export default function App() {
           <div className="stat-card">
             <span className="stat-label">Scanned Data</span>
             <span className="stat-value">
-              {meta.withData} <span className="stat-value-sub">/ {meta.scanned}</span>
+              {Math.min(meta.withData ?? 0, meta.universeCount ?? 500)} <span className="stat-value-sub">/ {meta.universeCount ?? 500}</span>
             </span>
             <div className="stat-progress">
               <span
@@ -617,7 +619,7 @@ export default function App() {
           <div className="stat-card highlights">
             <span className="stat-label">Passed Gates</span>
             <span className="stat-value text-gold">
-              {pbOn ? ((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)) : (meta.passed ?? ((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)))} <span className="stat-value-sub">Total</span>
+              {pbOn ? ((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) : (meta.passed ?? ((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)))} <span className="stat-value-sub">Total</span>
             </span>
             <div className="stat-split-bar flex h-2 rounded-full overflow-hidden mt-1.5">
               <span
@@ -625,7 +627,7 @@ export default function App() {
                 style={{
                   width: `${
                     ((effCounts?.module1 || 0) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)) || 1)) *
+                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) *
                     100
                   }%`,
                 }}
@@ -635,7 +637,7 @@ export default function App() {
                 style={{
                   width: `${
                     ((effCounts?.module2 || 0) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)) || 1)) *
+                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) *
                     100
                   }%`,
                 }}
@@ -645,7 +647,7 @@ export default function App() {
                 style={{
                   width: `${
                     ((effCounts?.module3 || 0) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)) || 1)) *
+                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) *
                     100
                   }%`,
                 }}
@@ -655,14 +657,24 @@ export default function App() {
                 style={{
                   width: `${
                     ((effCounts?.module4 || 0) /
-                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0)) || 1)) *
+                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) *
+                    100
+                  }%`,
+                }}
+              />
+              <div
+                className="stat-split-4 bg-cyan-400"
+                style={{
+                  width: `${
+                    ((effCounts?.module6 || 0) /
+                      (((effCounts?.module1 || 0) + (effCounts?.module2 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) *
                     100
                   }%`,
                 }}
               />
             </div>
             <span className="stat-sub text-xs">
-              M1: {effCounts?.module1 ?? 0} · M2: {effCounts?.module2 ?? 0} · M3: {effCounts?.module3 ?? 0} · M4: {effCounts?.module4 ?? 0}
+              M1: {effCounts?.module1 ?? 0} · M2: {effCounts?.module2 ?? 0} · M3: {effCounts?.module3 ?? 0} · M4: {effCounts?.module4 ?? 0} · M6: {effCounts?.module6 ?? 0}
             </span>
           </div>
           <div className="stat-card">
