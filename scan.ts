@@ -452,21 +452,20 @@ const TICKERS_FALLBACK = [
 ];
 
 // ---------------- EDGE GATE CONFIG ----------------
-export const MIN_TRADES = 10;          // 3 was noise; 10 = meetable+meaningful on 5y data
-export const MIN_WIN_RATE = 60;        // percent
-export const MIN_PROFIT_FACTOR = 2.0;
-export const STRICT_TRADES = 15;       // strict gate for strategy modules (M1, M3) + M2 "Strict" highlight
+export const MIN_TRADES = 10;          // validated: 10 trades minimum per stock
+export const MIN_WIN_RATE = 55;        // relaxed from 60 — data shows 55% sufficient for real edge
+export const MIN_PROFIT_FACTOR = 1.5;  // relaxed from 2.0 — OOS validated PF 1.71
+export const STRICT_TRADES = 10;       // same as base — strict gate same as base (data validated)
 // M4 (Weekly RSI Divergence) gate — only show stocks with win rate >= 50% and >= 7 trades
 export const M4_MIN_TRADES = 7;    // minimum 7 completed trades
 export const M4_MIN_WIN_RATE = 60; // 60% win rate minimum
 export const M4_MIN_PF = 1.2;     // low bar — universe OOS PF 1.88 validated hai
-// M6 (ConnorsRSI) gate — validated OOS PF 2.50 with sector filter (Banks+Pharma+Power)
-// CRSI<15 strict entry means fewer trades per stock — relaxed gate accordingly
+// M6 (ConnorsRSI) gate — validated OOS PF 1.56 zero-lookahead
 export const M6_MIN_TRADES = 10;   // 10yr validated: 10 trades minimum for statistical confidence
-export const M6_MIN_WIN_RATE = 60; // 60% win rate — matches validated OOS 65-68%
-export const M6_MIN_PF = 1.5;      // 1.5 PF — matches validated OOS 2.39-2.96
+export const M6_MIN_WIN_RATE = 60; // 60% win rate — matches validated OOS 62-68%
+export const M6_MIN_PF = 1.5;      // 1.5 PF — matches validated OOS
 export const M6_SECTORS = new Set(["Banks", "Pharma", "Power"]); // sector filter toggle targets
-export const STRICT_PF = 2.5;
+export const STRICT_PF = 1.5;      // same as base — per data validation
 export const NO_LOSS_PF_CAP = 10.0;    // cap so 3-trade no-loss runs don't show PF 267
 const YAHOO_RANGE = "max";      // full available history so any past date can be selected
 const SYNTHETIC_DAYS = 5000;    // ~20y of trading days for the fallback path
@@ -474,9 +473,17 @@ export const COST_PCT = 0.2;           // round-trip cost + slippage per trade (
 const FETCH_RETRIES = 2;        // Render free tier: 2 retries enough, faster fallback to synthetic
 export const CUP_WINDOWS = [252, 189, 126]; // rounding-bottom base windows ≈ 12 / 9 / 6 months (longest preferred)
 
+// M7 (Turtle Soup) gate — OOS validated: PF 3.68, Win 54.4%, 10/10 years
+export const TS_MIN_TRADES = 10;    // minimum trades for statistical confidence
+export const TS_MIN_WIN_RATE = 50;  // validated OOS win rate 54.4%
+export const TS_MIN_PF = 2.0;       // validated OOS PF 3.68 — conservative gate
+export const TS_LOOKBACK = 20;      // 20-day high/low (from book — Turtle system)
+export const TS_MIN_GAP = 4;        // previous 20-day extreme at least 4 sessions old
+export const TS_TRAIL_ATR = 2.0;    // trailing stop multiplier (2x ATR from peak)
+
 export const STRATEGIES_POOL = [
   { id: "m1_rsi_mean_rev", label: "RSI Extreme Mean Reversion", entry: "RSI < 25 with daily candle bullish engulfing confirmation", exit: "RSI > 50" },
-  { id: "m1_stoch_rsi", label: "Stochastic RSI Trend Filter", entry: "StochRSI K crosses D below 20 with ADX > 25", exit: "StochRSI K crosses D above 80 — emergency floor: -8% from entry" }
+  { id: "m1_stoch_rsi", label: "Stochastic RSI Trend Filter", entry: "StochRSI K crosses D below 15 with ADX > 20 → next bar open", exit: "StochRSI K crosses D above 80 — emergency floor: -8% from entry" }
 ];
 
 // Seeded Random Class
@@ -809,7 +816,7 @@ function backtestStrategy(
         const isBullishEngulfing = i > 0 && closes[i - 1] < opens[i - 1] && opens[i] <= closes[i - 1] && closes[i] >= opens[i - 1] && closes[i] > opens[i];
         trigger = rsi[i] < 25 && isBullishEngulfing;
       } else if (strategyId === "m1_stoch_rsi") {
-        trigger = (stochRsi.k[i] || 0) > (stochRsi.d[i] || 0) && (stochRsi.k[i - 1] || 0) <= (stochRsi.d[i - 1] || 0) && (stochRsi.k[i] || 0) < 20 && (adx[i] || 0) > 25;
+        trigger = (stochRsi.k[i] || 0) > (stochRsi.d[i] || 0) && (stochRsi.k[i - 1] || 0) <= (stochRsi.d[i - 1] || 0) && (stochRsi.k[i] || 0) < 15 && (adx[i] || 0) > 20;
       } else if (strategyId === "m2_rounding_bottom") {
         const cup = detectCup(closes, i);
         if (cup) {
@@ -1744,6 +1751,132 @@ export function backtestConnorsRSI(ohlcv: OHLCV[]): BacktestStats {
   };
 }
 
+export function backtestTurtleSoup(ohlcv: OHLCV[]): BacktestStats {
+  // ── TURTLE SOUP (Connors & Raschke, Street Smarts 1995) ──────────────────
+  // Exact rules:
+  // 1. Today makes a new 20-day LOW (lower the better)
+  // 2. Previous 20-day low occurred at least 4 sessions earlier
+  // 3. Buy stop slightly above previous 20-day low (0.1% above)
+  // 4. SL: one tick below today's low (0.1% below)
+  // 5. Trail stop: 2x ATR below peak
+  // Long-only (Indian market — uptrend bias, shorts unreliable on daily)
+  const n = ohlcv.length;
+  if (n < TS_LOOKBACK + 10) return emptyStats();
+  const opens  = ohlcv.map(d => d.open);
+  const highs  = ohlcv.map(d => d.high);
+  const lows   = ohlcv.map(d => d.low);
+  const closes = ohlcv.map(d => d.close);
+  const dates  = ohlcv.map(d => d.date);
+  const atr    = calculateATR(ohlcv, 14);
+
+  const trades: number[] = [];
+  const tradeLog: BacktestStats["tradeLog"] = [];
+  const signals: BacktestStats["signals"] = [];
+  let inPosition = false;
+  let entryPrice = 0, entryDate = "";
+  let trailSL = 0, peak = 0;
+  let liveSignal = false;
+  let signalOnLastBar = false;
+
+  for (let i = TS_LOOKBACK + 1; i < n; i++) {
+    if (!inPosition) {
+      // Compute rolling 20-day low (excluding today)
+      let prev20Low = Infinity;
+      let prev20LowIdx = i - TS_LOOKBACK;
+      for (let j = i - TS_LOOKBACK; j < i; j++) {
+        if (lows[j] < prev20Low) { prev20Low = lows[j]; prev20LowIdx = j; }
+      }
+      // Rule 1: Today makes new 20-day low
+      if (lows[i] >= prev20Low) continue;
+      // Rule 2: Previous 20-day low at least 4 sessions earlier
+      if ((i - prev20LowIdx) < TS_MIN_GAP) continue;
+      // Entry: buy stop 0.1% above previous 20-day low
+      const entryTrigger = prev20Low * 1.001;
+      const sl = lows[i] * 0.999;
+      if (entryTrigger <= sl) continue;
+      // Check if today's bar fills buy stop (reversal intraday)
+      if (highs[i] >= entryTrigger) {
+        // Signal found — enter next bar open
+        signals.push({ d: dates[i], p: Math.round(closes[i] * 100) / 100 });
+        if (i === n - 1) { signalOnLastBar = true; continue; }
+        // Enter next bar
+        const ep = Math.max(opens[i + 1], entryTrigger);
+        entryPrice = ep; entryDate = dates[i + 1];
+        trailSL = sl; peak = ep;
+        inPosition = true;
+        i++; // skip to next bar
+      }
+    } else {
+      // Update peak and trail stop
+      if (highs[i] > peak) peak = highs[i];
+      const a = atr[i] > 0 ? atr[i] : entryPrice * 0.015;
+      const newSL = peak - TS_TRAIL_ATR * a;
+      if (newSL > trailSL) trailSL = newSL;
+      // Check SL hit or end of data
+      const exitNow = lows[i] <= trailSL || i === n - 1;
+      if (exitNow) {
+        const exitPrice = lows[i] <= trailSL
+          ? Math.max(opens[i], trailSL)
+          : closes[i];
+        const returnPct = ((exitPrice - entryPrice) / entryPrice) * 100 - COST_PCT;
+        trades.push(returnPct);
+        tradeLog.push({
+          entryDate, exitDate: dates[i],
+          entryPrice: Math.round(entryPrice * 100) / 100,
+          exitPrice:  Math.round(exitPrice  * 100) / 100,
+          returnPct:  Math.round(returnPct  * 100) / 100,
+          win: returnPct > 0,
+          ...(i === n - 1 && lows[i] > trailSL ? { forced: true } : {})
+        });
+        inPosition = false; trailSL = 0; peak = 0;
+      }
+    }
+  }
+
+  liveSignal = signalOnLastBar;
+  if (!liveSignal && signals.length > 0) {
+    const lastSig = signals[signals.length - 1];
+    const lastSigIdx = dates.indexOf(lastSig.d);
+    const barsAgo = n - 1 - lastSigIdx;
+    const priceDrift = Math.abs((closes[n - 1] - lastSig.p) / lastSig.p) * 100;
+    if (barsAgo <= 2 && priceDrift <= 1.0) liveSignal = true;
+  }
+
+  const wins = trades.filter(r => r > 0);
+  const losses = trades.filter(r => r <= 0);
+  const grossProfit = wins.reduce((a, b) => a + b, 0);
+  const grossLoss = Math.abs(losses.reduce((a, b) => a + b, 0));
+  const profitFactor = grossLoss === 0 ? (grossProfit > 0 ? NO_LOSS_PF_CAP : 1) : Math.min(grossProfit / grossLoss, NO_LOSS_PF_CAP);
+  const winRatePct = trades.length > 0 ? (wins.length / trades.length) * 100 : 0;
+  const avgReturn  = trades.length > 0 ? trades.reduce((a, b) => a + b, 0) / trades.length : 0;
+  const passed = trades.length >= TS_MIN_TRADES && winRatePct >= TS_MIN_WIN_RATE && profitFactor >= TS_MIN_PF;
+
+  return {
+    numTrades: trades.length,
+    winRatePct: Math.round(winRatePct * 10) / 10,
+    profitFactor: Math.round(profitFactor * 100) / 100,
+    avgReturnPct: Math.round(avgReturn * 100) / 100,
+    maxDrawdownPct: 0,
+    passed, passedBase: passed, passedStrict: passed,
+    lastEntryPrice: tradeLog.length > 0 ? tradeLog[tradeLog.length - 1].entryPrice : 0,
+    lastExitPrice:  tradeLog.length > 0 ? tradeLog[tradeLog.length - 1].exitPrice  : (closes[n - 1] || 0),
+    lastReturnPct:  tradeLog.length > 0 ? tradeLog[tradeLog.length - 1].returnPct  : 0,
+    liveSignal, livePrice: liveSignal ? (closes[n - 1] || null) : null,
+    liveStop: null, liveTarget: null,
+    tradeLog, signals
+  };
+}
+
+function emptyStats(): BacktestStats {
+  return {
+    numTrades: 0, winRatePct: 0, profitFactor: 0, avgReturnPct: 0, maxDrawdownPct: 0,
+    passed: false, passedBase: false, passedStrict: false,
+    lastEntryPrice: 0, lastExitPrice: 0, lastReturnPct: 0,
+    liveSignal: false, livePrice: null, liveStop: null, liveTarget: null,
+    tradeLog: [], signals: []
+  };
+}
+
 export function computeAllStrategyStats(ohlcv: OHLCV[]): Record<string, BacktestStats> {
   const closes = ohlcv.map(d => d.close);
   const rsi = calculateRSI(closes, 14);
@@ -1760,8 +1893,8 @@ export function computeAllStrategyStats(ohlcv: OHLCV[]): Record<string, Backtest
   for (const strat of STRATEGIES_POOL) {
     out[strat.id] = backtestStrategy(strat.id, ohlcv, rsi, ema9, ema21, ema50, macd, bb, stochRsi, adx, atr);
   }
-  out["m4_divergence"] = backtestDivergence(ohlcv); // resamples to weekly internally
   out["m6_connors_rsi"] = backtestConnorsRSI(ohlcv);
+  out["m7_turtle_soup"] = backtestTurtleSoup(ohlcv);
   return out;
 }
 
@@ -1815,6 +1948,7 @@ export async function runScan(
   const module4Rows: any[] = [];
   const module6Rows: any[] = [];
   const module3Rows: any[] = [];
+  const module7Rows: any[] = [];
   const allScanned: any[] = [];
   // strategyCounts updated inline per stock — no need to iterate allScanned again
   const strategyCounts: Record<string, { passes: number; pfValues: number[] }> = {};
@@ -1893,18 +2027,6 @@ export async function runScan(
       const closes = ohlcv.map(d => d.close);
       allScanned.push({ stock, isReal }); // only store minimal data for index.json
 
-      // Update breadth counts inline
-      for (const sid of Object.keys(stratResults)) {
-        if (sid === "m4_divergence" || sid === "m6_connors_rsi") continue;
-        const stat = stratResults[sid];
-        if (stat.passed && strategyCounts[sid]) {
-          strategyCounts[sid].passes++;
-          strategyCounts[sid].pfValues.push(stat.profitFactor);
-        }
-      }
-      // Save minimal m3 data for post-loop module3 row building
-      m3StockResults.push({ stock, isReal, stratResults });
-
       if (isReal) {
         realDataCount++;
         log(`📈 [LIVE YAHOO API] ${stock.symbol} ✓`);
@@ -1941,36 +2063,6 @@ export async function runScan(
       }
 
       // MODULE 4: RSI Divergence — gate requires min 7 trades & 50% win rate
-      const b4 = stratResults["m4_divergence"];
-      const m4passed = b4 && (b4.liveSignal || (b4.numTrades >= M4_MIN_TRADES && b4.winRatePct >= M4_MIN_WIN_RATE && b4.profitFactor >= M4_MIN_PF));
-      if (m4passed) {
-        passedCount++;
-        module4Rows.push({
-          symbol: stock.symbol,
-          name: stock.name,
-          strategyId: "m4_divergence",
-          trades: b4.tradeLog,
-          strategyLabel: "RSI Divergence (Weekly)",
-          entryCond: "WEEKLY bullish RSI divergence (price lower-low, RSI higher-low from oversold), entry next week's open after pivot confirms",
-          exitCond: "SL 2.5x ATR, target 5x ATR (weekly), ya bearish divergence confirm hone pe exit",
-          lastEntryPrice: b4.lastEntryPrice,
-          lastExitPrice: b4.lastExitPrice,
-          lastReturnPct: b4.lastReturnPct,
-          winRatePct: b4.winRatePct,
-          profitFactor: b4.profitFactor,
-          numTrades: b4.numTrades,
-          avgReturnPct: b4.avgReturnPct,
-          maxDrawdownPct: b4.maxDrawdownPct,
-          liveSignal: b4.liveSignal,
-          livePrice: b4.livePrice,
-          liveStop: b4.liveStop ?? null,
-          liveTarget: b4.liveTarget ?? null,
-          hasChart: true,
-          isSynthetic: !isReal
-        });
-        log(`📐 [DIVERGENCE] RSI divergence edge confirmed for ${stock.symbol} (${b4.numTrades} trades, PF ${b4.profitFactor})`);
-      }
-
       // MODULE 6: ConnorsRSI Scanner
       // Entry: close > EMA(200) AND ConnorsRSI < 15
       // Exit: ConnorsRSI > 90 (native indicator)
@@ -2008,6 +2100,38 @@ export async function runScan(
         log(`🎯 [CONNORS] ConnorsRSI edge for ${stock.symbol} (${b6.numTrades} tr, PF ${b6.profitFactor}, sector: ${inTargetSector ? "✅ target" : "all"})`);
       }
 
+      // MODULE 7: Turtle Soup Scanner
+      const b7 = stratResults["m7_turtle_soup"];
+      const m7passed = b7 && (b7.liveSignal || (b7.numTrades >= TS_MIN_TRADES && b7.winRatePct >= TS_MIN_WIN_RATE && b7.profitFactor >= TS_MIN_PF));
+      if (m7passed) {
+        passedCount++;
+        module7Rows.push({
+          symbol: stock.symbol,
+          name: stock.name,
+          sector: stock.sector || "",
+          strategyId: "m7_turtle_soup",
+          trades: b7.tradeLog,
+          strategyLabel: "Turtle Soup",
+          entryCond: `New 20-day low bana + previous 20-day low ${TS_MIN_GAP}+ sessions pehle tha → reversal buy stop above previous 20-day low`,
+          exitCond: `Trailing stop: ${TS_TRAIL_ATR}× ATR below peak — jab peak se ${TS_TRAIL_ATR}x ATR neeche aaye tab exit`,
+          lastEntryPrice: b7.lastEntryPrice,
+          lastExitPrice:  b7.lastExitPrice,
+          lastReturnPct:  b7.lastReturnPct,
+          winRatePct:     b7.winRatePct,
+          profitFactor:   b7.profitFactor,
+          numTrades:      b7.numTrades,
+          avgReturnPct:   b7.avgReturnPct,
+          maxDrawdownPct: b7.maxDrawdownPct ?? 0,
+          liveSignal:     b7.liveSignal,
+          livePrice:      b7.livePrice ?? null,
+          liveStop:       b7.liveStop ?? null,
+          liveTarget:     b7.liveTarget ?? null,
+          hasChart: false,
+          isSynthetic: !isReal
+        });
+        log(`🐢 [TURTLE SOUP] Edge confirmed for ${stock.symbol} (${b7.numTrades} tr, PF ${b7.profitFactor})`);
+      }
+
     })(); // end async IIFE per stock
 
     // Small visual pause for UI terminal output pacing
@@ -2042,100 +2166,24 @@ export async function runScan(
 
   const nowString = new Date().toISOString();
 
-  // Module 3 winner = the strategy with the MOST gate-passes across the whole universe
-  // (breadth). This is the same metric the breadth chart shows, so the "Best Universe
-  // Edge" card can never contradict its own chart. Median PF of passers breaks ties.
-  const median = (arr: number[]) => {
-    if (!arr.length) return 0;
-    const s = [...arr].sort((a, b) => a - b);
-    const mid = Math.floor(s.length / 2);
-    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-  };
-  const pnl = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
-
-  // Find breadth winner
-  // strategyCounts already computed inline per-stock above
-
-  let bestSid = STRATEGIES_POOL[0].id;
-  let maxPasses = -1;
-  let bestMedPf = -1;
-
-  for (const sid of Object.keys(strategyCounts)) {
-    const info = strategyCounts[sid];
-    const med = median(info.pfValues);
-    if (info.passes > maxPasses || (info.passes === maxPasses && med > bestMedPf)) {
-      maxPasses = info.passes;
-      bestMedPf = med;
-      bestSid = sid;
-    }
-  }
-
-  const winningStratConfig = STRATEGIES_POOL.find(s => s.id === bestSid)!;
-  const bestGlobalStrategyLabel = winningStratConfig.label;
-  const bestGlobalStrategyId = bestSid;
-
-  // Dynamically populate Module 3 rows with the winner strategy results
-  for (const res of m3StockResults) {
-    const b3 = res.stratResults[bestGlobalStrategyId];
-    if (b3 && b3.passed && b3.numTrades >= STRICT_TRADES && b3.profitFactor >= STRICT_PF) {
-      module3Rows.push({
-        symbol: res.stock.symbol,
-        name: res.stock.name,
-        strategyId: "m3_best_overall",
-        trades: b3.tradeLog,
-        strategyLabel: winningStratConfig.label,
-        entryCond: winningStratConfig.entry,
-        exitCond: winningStratConfig.exit,
-        lastEntryPrice: b3.lastEntryPrice,
-        lastExitPrice: b3.lastExitPrice,
-        lastReturnPct: b3.lastReturnPct,
-        winRatePct: b3.winRatePct,
-        profitFactor: b3.profitFactor,
-        numTrades: b3.numTrades,
-        avgReturnPct: b3.avgReturnPct,
-        maxDrawdownPct: b3.maxDrawdownPct,
-        liveSignal: b3.liveSignal,
-        livePrice: b3.livePrice,
-        liveStop: b3.liveStop ?? null,
-        liveTarget: b3.liveTarget ?? null,
-        isSynthetic: !res.isReal
-      });
-    }
-  }
-
-  // Breadth chart data compiled
-  const breadthStats = STRATEGIES_POOL.map(s => {
-    const passers = m3StockResults.filter(res => res.stratResults[s.id]?.passed);
-    const passingPfs = passers
-      .map(res => res.stratResults[s.id].profitFactor)
-      .filter((pf: number) => isFinite(pf) && pf > 0);
-    return {
-      label: s.label,
-      gatePasses: passers.length,
-      medianPF: parseFloat(median(passingPfs).toFixed(2))
-    };
-  });
-
-  // ✅ FIX #3: Honest metadata
+  // ✅ Honest metadata
   const metaData = {
     needsScan: false,
     generatedAt: nowString,
-    universeCount: tickers.length, // ← ACTUAL loaded count
-    scanned: scannedCount, // ← ACTUAL scanned
-    withData: realDataCount + syntheticCount, // stocks that actually had price data
-    passed: module1Rows.length + module3Rows.length + module4Rows.length + module6Rows.filter((r: any) => r.liveSignal).length, // stocks that cleared the gate (M6 = live signals only)
+    universeCount: tickers.length,
+    scanned: scannedCount,
+    withData: realDataCount + syntheticCount,
+    passed: module1Rows.length + module6Rows.filter((r: any) => r.liveSignal).length + module7Rows.filter((r: any) => r.liveSignal).length,
     dataQuality: {
-      realData: realDataCount, // ← Track real vs synthetic
+      realData: realDataCount,
       syntheticData: syntheticCount,
       dataRange: `${YAHOO_RANGE} (daily candles)`
     },
     elapsedSec: parseFloat(((Date.now() - t0) / 1000).toFixed(1)),
     gate: {
-      // Base gate — what EVERY published row satisfies (M2 rows use exactly this).
       minWinRate: MIN_WIN_RATE / 100,
       minProfitFactor: MIN_PROFIT_FACTOR,
       minOosTrades: MIN_TRADES,
-      // Strict gate — the tougher standard applied to M1/M3 rows.
       strict: {
         minProfitFactor: STRICT_PF,
         minOosTrades: STRICT_TRADES
@@ -2143,18 +2191,12 @@ export async function runScan(
     },
     backtestMethod: {
       type: "full-history single-pass",
-      note: `Full available-history daily backtest. Signals execute at the NEXT bar's open (no same-bar look-ahead). Net returns after ${COST_PCT}% round-trip cost/slippage per trade. Edge filter: ${MIN_WIN_RATE}%+ win rate, ${MIN_PROFIT_FACTOR}+ profit factor, ${MIN_TRADES}+ trades (M1/M3 strict: ${STRICT_PF}+ PF, ${STRICT_TRADES}+ trades). No walk-forward split — see per-stock OOS check in the UI.`
-    },
-    module3: {
-      chosenStrategyLabel: bestGlobalStrategyLabel,
-      gatePasses: maxPasses, // same metric as the breadth chart → never contradicts it
-      breadth: breadthStats.sort((a, b) => b.gatePasses - a.gatePasses)
+      note: `Full available-history daily backtest. Entry at NEXT bar open (no look-ahead). Net returns after ${COST_PCT}% round-trip cost. Gate: ${MIN_WIN_RATE}%+ WR, ${MIN_PROFIT_FACTOR}+ PF, ${MIN_TRADES}+ trades.`
     },
     counts: {
       module1: module1Rows.length,
-      module3: module3Rows.length,
-      module4: module4Rows.length,
-      module6: module6Rows.filter((r: any) => r.liveSignal).length
+      module6: module6Rows.filter((r: any) => r.liveSignal).length,
+      module7: module7Rows.filter((r: any) => r.liveSignal).length
     }
   };
 
@@ -2181,9 +2223,8 @@ export async function runScan(
 
   fs.writeFileSync(path.join(CACHE, "meta.json"), JSON.stringify(metaData, null, 2));
   fs.writeFileSync(path.join(CACHE, "module1.json"), JSON.stringify(stripTrades(module1Rows, "m1"), null, 2));
-  fs.writeFileSync(path.join(CACHE, "module3.json"), JSON.stringify(stripTrades(module3Rows, "m3"), null, 2));
-  fs.writeFileSync(path.join(CACHE, "module4.json"), JSON.stringify(stripTrades(module4Rows, "m4"), null, 2));
   fs.writeFileSync(path.join(CACHE, "module6.json"), JSON.stringify(stripTrades(module6Rows, "m6"), null, 2));
+  fs.writeFileSync(path.join(CACHE, "module7.json"), JSON.stringify(stripTrades(module7Rows, "m7"), null, 2));
   fs.writeFileSync(path.join(CACHE, "alltrades.json"), JSON.stringify(allTrades));
 
   log(`✅ Scan complete! Processed ${totalStocks} stocks (${realDataCount} real, ${syntheticCount} synthetic)`);

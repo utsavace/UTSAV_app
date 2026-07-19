@@ -211,10 +211,16 @@ export function Ledger({
   };
 
   const submitTake = async (r: LedgerRow) => {
-    const entryPrice = Number(tEntry), stopPrice = Number(tStop), targetPrice = Number(tTarget);
+    const entryPrice = Number(tEntry);
+    const isM6 = r.strategyId === "m6_connors_rsi";
     if (!isFinite(entryPrice) || entryPrice <= 0) { setTakeMsg("❌ Valid entry price daalo"); return; }
-    if (!isFinite(stopPrice) || stopPrice >= entryPrice) { setTakeMsg("❌ Stop-loss entry se NEECHE hona chahiye"); return; }
-    if (!isFinite(targetPrice) || targetPrice <= entryPrice) { setTakeMsg("❌ Target entry se UPAR hona chahiye"); return; }
+    // M6: indicator-based exit — no fixed stop/target needed
+    const stopPrice  = isM6 ? Math.round(entryPrice * 0.92) : Number(tStop);
+    const targetPrice = isM6 ? Math.round(entryPrice * (1 + Math.max(r.avgReturnPct, 3) / 100)) : Number(tTarget);
+    if (!isM6) {
+      if (!isFinite(stopPrice) || stopPrice >= entryPrice) { setTakeMsg("❌ Stop-loss entry se NEECHE hona chahiye"); return; }
+      if (!isFinite(targetPrice) || targetPrice <= entryPrice) { setTakeMsg("❌ Target entry se UPAR hona chahiye"); return; }
+    }
     setTaking(true);
     try {
       const res = await fetch("/api/trades/take", {
@@ -300,16 +306,33 @@ export function Ledger({
         ) : (
           <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/35 font-mono text-xs text-slate-300">
             <div className="font-bold text-amber-400 mb-2">✋ Taking {r.symbol.replace(".NS", "")} — apna actual plan confirm karo</div>
-            <div className="flex flex-wrap gap-3 items-center">
-              <label className="flex items-center gap-1">Entry ₹ <input style={inp} value={tEntry} onChange={(e) => recalcFromEntry(r, e.target.value)} placeholder="e.g. 3048" /></label>
-              <label className="flex items-center gap-1">Stop ₹ <input style={{ ...inp, borderColor: "rgba(239,68,68,0.5)" }} value={tStop} onChange={(e) => setTStop(e.target.value)} /></label>
-              <label className="flex items-center gap-1">Target ₹ <input style={{ ...inp, borderColor: "rgba(34,197,94,0.5)" }} value={tTarget} onChange={(e) => setTTarget(e.target.value)} /></label>
-              <button onClick={() => submitTake(r)} disabled={taking} className="bg-green-600 hover:bg-green-700 text-slate-950 font-extrabold border-none rounded-sm px-3 py-1 cursor-pointer text-xs disabled:opacity-60">
-                {taking ? "Saving…" : "✓ Confirm"}
-              </button>
-              <button onClick={() => setTakeOpen(null)} className="bg-transparent text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-600 rounded-sm px-3 py-1 cursor-pointer text-xs">Cancel</button>
-            </div>
-            {!r.liveSignal && (
+            {r.strategyId === "m6_connors_rsi" ? (
+              // M6: indicator-based exit — Stop/Target fields nahi, sirf Entry + note
+              <div>
+                <div className="flex flex-wrap gap-3 items-center mb-2">
+                  <label className="flex items-center gap-1">Entry ₹ <input style={inp} value={tEntry} onChange={(e) => setTEntry(e.target.value)} placeholder="e.g. 40855" /></label>
+                  <button onClick={() => submitTake(r)} disabled={taking} className="bg-green-600 hover:bg-green-700 text-slate-950 font-extrabold border-none rounded-sm px-3 py-1 cursor-pointer text-xs disabled:opacity-60">
+                    {taking ? "Saving…" : "✓ Confirm"}
+                  </button>
+                  <button onClick={() => setTakeOpen(null)} className="bg-transparent text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-600 rounded-sm px-3 py-1 cursor-pointer text-xs">Cancel</button>
+                </div>
+                <div className="text-cyan-400/80 text-[11px] mt-1 leading-5">
+                  🎯 Exit: <strong>ConnorsRSI &gt; 90 hone pe</strong> — app "My Trades" me exit signal dikhayega<br/>
+                  🛡️ Emergency floor: entry se <strong>−8%</strong> neeche gaye to manually exit karo
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap gap-3 items-center">
+                <label className="flex items-center gap-1">Entry ₹ <input style={inp} value={tEntry} onChange={(e) => recalcFromEntry(r, e.target.value)} placeholder="e.g. 3048" /></label>
+                <label className="flex items-center gap-1">Stop ₹ <input style={{ ...inp, borderColor: "rgba(239,68,68,0.5)" }} value={tStop} onChange={(e) => setTStop(e.target.value)} /></label>
+                <label className="flex items-center gap-1">Target ₹ <input style={{ ...inp, borderColor: "rgba(34,197,94,0.5)" }} value={tTarget} onChange={(e) => setTTarget(e.target.value)} /></label>
+                <button onClick={() => submitTake(r)} disabled={taking} className="bg-green-600 hover:bg-green-700 text-slate-950 font-extrabold border-none rounded-sm px-3 py-1 cursor-pointer text-xs disabled:opacity-60">
+                  {taking ? "Saving…" : "✓ Confirm"}
+                </button>
+                <button onClick={() => setTakeOpen(null)} className="bg-transparent text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-600 rounded-sm px-3 py-1 cursor-pointer text-xs">Cancel</button>
+              </div>
+            )}
+            {!r.liveSignal && r.strategyId !== "m6_connors_rsi" && (
               <div className="text-amber-500 text-[10px] mt-1.5">⚠️ Is stock pe abhi LIVE signal nahi hai — apne broker ka ACTUAL entry price daalo, purane backtest price pe mat jao.</div>
             )}
             {takeMsg && <div className={`mt-1.5 ${takeMsg.startsWith("✅") ? "text-green-500" : "text-red-500"}`}>{takeMsg}</div>}

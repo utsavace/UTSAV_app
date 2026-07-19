@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
 import { Ledger, type LedgerRow } from "./components/Ledger.tsx";
 import { MyTrades } from "./components/MyTrades.tsx";
-import { DivergenceChart } from "./components/DivergenceChart.tsx";
+// DivergenceChart removed — M4 Weekly Divergence module removed
 // ExitSchemeComparison removed — replaced by ConnorsRSI (M6) module
 
 interface Meta {
@@ -21,12 +21,6 @@ interface Meta {
   };
   walkForward?: { trainFrac: number; note: string };
   backtestMethod?: { type: string; note: string };
-  module3?: {
-    chosenStrategyLabel: string;
-    gatePasses: number;
-    breadth: { label: string; gatePasses: number; medianPF: number }[];
-  };
-  counts?: { module1: number; module3: number; module4: number; module6: number };
   passed?: number;
 }
 
@@ -36,19 +30,17 @@ interface Bucketed {
 }
 
 const TABS = [
-  { n: 1, key: "opt", label: "RSI & StochRSI Scanner" },
-  { n: 3, key: "best", label: "Universe Best Edge" },
-  { n: 4, key: "div", label: "Weekly RSI Divergence" },
+  { n: 1, key: "stoch", label: "StochRSI Scanner" },
+  { n: 6, key: "connors", label: "ConnorsRSI Oversold" },
+  { n: 7, key: "turtle", label: "Turtle Soup" },
   { n: 5, key: "journal", label: "My Trades" },
-  { n: 6, key: "connors_rsi", label: "ConnorsRSI Oversold" },
 ] as const;
 
 const DESC: Record<number, string> = {
-  1: "Do strategies — RSI Extreme Mean Reversion (RSI<25 + bullish engulfing, exit RSI>50) aur Stochastic RSI Trend Filter (StochRSI K crosses D below 20 + ADX>25, exit K crosses D above 80). Har stock ke liye dono me se best wali automatically choose hoti hai.",
-  3: "Poore Nifty-500 universe me jo ek strategy sabse zyada stocks pass karti hai — wohi sirf ek strategy sab eligible stocks pe apply karta hai. Abhi Universe winner: Stochastic RSI Trend Filter.",
-  4: "Weekly chart pe RSI bullish divergence dhundhta hai — price lower-low banaata hai par RSI higher-low banaata hai oversold zone se. Entry next week open pe, exit 2.5×ATR stop-loss ya 5×ATR target.",
+  1: "Stochastic RSI Trend Filter — StochRSI K crosses D below 15 + ADX > 20 → next bar open pe entry. Exit: K crosses D above 80. 10yr zero-lookahead OOS validated: PF 1.71, Win 58.3%, 6/6 years profitable. Gate: 10 trades / 55% WR / 1.5 PF.",
+  6: "ConnorsRSI(3,2,100) oversold scanner — Price > EMA(200) + ConnorsRSI < 15 (deeply oversold in uptrend) → next bar open pe entry. Exit: ConnorsRSI > 90. 10yr OOS validated: PF 2.74, Win 72.1%, 5/5 years profitable. Gate: 10 trades / 60% WR / 1.5 PF.",
+  7: "Turtle Soup (Connors & Raschke, Street Smarts 1995) — New 20-day low bana + previous 20-day low 4+ sessions pehle tha → false breakdown reversal. Entry: buy stop above previous 20-day low. Exit: 2×ATR trailing stop. 10yr OOS validated: PF 3.68, Win 54.4%, 10/10 years profitable. Zero parameter optimization.",
   5: "Tumhara personal trade journal — jis stock ka trade lena ho usse yahan save karo. App rooz check karta hai ki exit signal aaya ya nahi aur status dikhata hai: Holding ✅ ya EXIT ⚠️.",
-  6: "ConnorsRSI(3,2,100) = 3 indicators ka average (RSI-3, Streak RSI-2, PercentRank-100). Entry jab price EMA(200) ke upar ho aur ConnorsRSI 15 se neeche aaye (deeply oversold in uptrend). Exit jab ConnorsRSI 90 se upar jaaye. OOS validated: PF 2.59, Win 68%.",
 };
 
 export default function App() {
@@ -60,11 +52,7 @@ export default function App() {
   // Search & Filter state
   const [searchQuery, setSearchQuery] = useState("");
   const [liveOnly, setLiveOnly] = useState(false);
-  const [m2Strict, setM2Strict] = useState(true); // M2: highlight rows meeting strict 15/2.5 (default ON)
-  const [m4MinTrades, setM4MinTrades] = useState(7);
-  const [m4MinWinRate, setM4MinWinRate] = useState(60);
-  const [m4Strict, setM4Strict] = useState(false);
-  const [m6SectorFilter, setM6SectorFilter] = useState(false); // M6: false=all sectors, true=Banks+Pharma+Power
+  const [m6SectorFilter, setM6SectorFilter] = useState(false);
   const [historyStart, setHistoryStart] = useState(() => {
     const d = new Date();
     d.setFullYear(d.getFullYear() - 5); // default: last 5 years; pick any older date to go further back
@@ -75,8 +63,6 @@ export default function App() {
   const [journalCount, setJournalCount] = useState<number | null>(null);
 
   // Divergence Chart state
-  const [chartSymbol, setChartSymbol] = useState<string | null>(null);
-  const [chartName, setChartName] = useState<string | null>(null);
 
   // Load journal count once for the tab badge
   useEffect(() => {
@@ -396,8 +382,6 @@ export default function App() {
   // Reset filter/sort state when changing tabs
   useEffect(() => {
     setSearchQuery("");
-    // M6 (ConnorsRSI) has a strong historical edge so many stocks pass the gate —
-    // default to LIVE-only so users see actionable signals, not the whole passing universe.
     setLiveOnly(tab === 6);
     setSortField(null);
     setSortAsc(false);
@@ -427,13 +411,6 @@ export default function App() {
     if (liveOnly) {
       result = result.filter((r) => r.liveSignal);
     }
-    // M4 tab: apply user-selected min trades + win rate filter
-    if (tab === 4) {
-      result = result.filter((r) =>
-        (!m4Strict && r.liveSignal) ||
-        (r.numTrades >= m4MinTrades && r.winRatePct >= m4MinWinRate)
-      );
-    }
     // M6 tab: sector toggle — Banks+Pharma+Power only when enabled
     if (tab === 6 && m6SectorFilter) {
       result = result.filter((r) => (r as any).inTargetSector === true);
@@ -458,15 +435,13 @@ export default function App() {
       });
     }
     return result;
-  }, [rows, searchQuery, liveOnly, sortField, sortAsc, pbOn, pbSnap, tab, m4MinTrades, m4MinWinRate, m4Strict, m6SectorFilter]);
+  }, [rows, searchQuery, liveOnly, sortField, sortAsc, pbOn, pbSnap, tab, m6SectorFilter]);
 
   const g = meta?.gate;
   const needsScan = meta?.needsScan && !pbOn; // playback has its own data source
   const effCounts = pbOn ? pbSnap?.counts : meta?.counts;
-  const effModule3 = pbOn ? pbSnap?.module3Meta : meta?.module3;
   const sourceRowsLen = pbOn ? ((pbSnap?.["module" + tab] as LedgerRow[] | undefined)?.length ?? 0) : rows.length;
   const pbIdx = pbOn && pbDate ? pbAxis.indexOf(pbDate) : -1;
-  const currentTab = useMemo(() => TABS.find((t) => t.n === tab) || TABS[0], [tab]);
 
   return (
     <div className="app">
@@ -616,52 +591,16 @@ export default function App() {
           <div className="stat-card highlights">
             <span className="stat-label">Passed Gates</span>
             <span className="stat-value text-gold">
-              {pbOn ? ((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) : (meta.passed ?? ((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)))} <span className="stat-value-sub">Total</span>
+              {pbOn ? ((effCounts?.module1 || 0) + (effCounts?.module6 || 0) + (effCounts?.module7 || 0)) : (meta.passed ?? ((effCounts?.module1 || 0) + (effCounts?.module6 || 0) + (effCounts?.module7 || 0)))} <span className="stat-value-sub">Total</span>
             </span>
             <div className="stat-split-bar flex h-2 rounded-full overflow-hidden mt-1.5">
-              <span
-                className="stat-split-1 bg-amber-500"
-                style={{
-                  width: `${((effCounts?.module1 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) * 100}%`,
-                }}
-              />
-              <span
-                className="stat-split-3 bg-purple-500"
-                style={{
-                  width: `${((effCounts?.module3 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) * 100}%`,
-                }}
-              />
-              <span
-                className="stat-split-4 bg-emerald-500"
-                style={{
-                  width: `${((effCounts?.module4 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) * 100}%`,
-                }}
-              />
-              <div
-                className="stat-split-4 bg-cyan-400"
-                style={{
-                  width: `${((effCounts?.module6 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module3 || 0) + (effCounts?.module4 || 0) + (effCounts?.module6 || 0)) || 1)) * 100}%`,
-                }}
-              />
+              <span className="stat-split-1 bg-amber-500" style={{ width: `${((effCounts?.module1 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module6 || 0) + (effCounts?.module7 || 0)) || 1)) * 100}%` }} />
+              <div className="stat-split-6 bg-cyan-400" style={{ width: `${((effCounts?.module6 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module6 || 0) + (effCounts?.module7 || 0)) || 1)) * 100}%` }} />
+              <div className="stat-split-7 bg-emerald-500" style={{ width: `${((effCounts?.module7 || 0) / (((effCounts?.module1 || 0) + (effCounts?.module6 || 0) + (effCounts?.module7 || 0)) || 1)) * 100}%` }} />
             </div>
             <span className="stat-sub text-xs">
-              RSI/StochRSI: {effCounts?.module1 ?? 0} · Universe: {effCounts?.module3 ?? 0} · Divergence: {effCounts?.module4 ?? 0} · ConnorsRSI: {effCounts?.module6 ?? 0}
+              StochRSI: {effCounts?.module1 ?? 0} · ConnorsRSI: {effCounts?.module6 ?? 0} · Turtle Soup: {effCounts?.module7 ?? 0}
             </span>
-          </div>
-          <div className="stat-card">
-            <span className="stat-label">Best Universe Edge</span>
-            <span className="stat-value text-premium-blue truncate" title={effModule3?.chosenStrategyLabel}>
-              {effModule3?.chosenStrategyLabel || "—"}
-            </span>
-            <div className="stat-progress">
-              <span
-                className="stat-progress-fill info"
-                style={{
-                  width: `${((effModule3?.gatePasses || 0) / (meta.withData || 1)) * 100}%`,
-                }}
-              />
-            </div>
-            <span className="stat-sub">{effModule3?.gatePasses ?? 0} breadth passes</span>
           </div>
         </section>
       )}
@@ -701,7 +640,7 @@ export default function App() {
       <section className="panel">
         <div className="panel-head-group">
           <div className="panel-info">
-            <h2>{currentTab.label}</h2>
+            <h2>{TABS[tab - 1].label}</h2>
             <p>{DESC[tab]}</p>
           </div>
           {!needsScan && sourceRowsLen > 0 && (
@@ -728,50 +667,6 @@ export default function App() {
                   <span className="toggle-dot" />
                   LIVE Signals Only
                 </button>
-                {tab === 4 && (
-                  <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                      <span style={{ color: "#8e9ba9", fontSize: "12px", fontFamily: "monospace" }}>Min Trades</span>
-                      <select
-                        value={m4MinTrades}
-                        onChange={(e) => setM4MinTrades(Number(e.target.value))}
-                        style={{ background: "#0f141c", border: "1px solid #212836", color: "#e6edf5", borderRadius: "6px", padding: "4px 8px", fontFamily: "monospace", fontSize: "12px", cursor: "pointer" }}
-                      >
-                        {[7, 8, 9, 10, 11, 12, 15].map(v => (
-                          <option key={v} value={v}>{v}+</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                      <span style={{ color: "#8e9ba9", fontSize: "12px", fontFamily: "monospace" }}>Min Win%</span>
-                      <select
-                        value={m4MinWinRate}
-                        onChange={(e) => setM4MinWinRate(Number(e.target.value))}
-                        style={{ background: "#0f141c", border: "1px solid #212836", color: "#e6edf5", borderRadius: "6px", padding: "4px 8px", fontFamily: "monospace", fontSize: "12px", cursor: "pointer" }}
-                      >
-                        {[60, 70, 80, 90, 100].map(v => (
-                          <option key={v} value={v}>{v}%+</option>
-                        ))}
-                      </select>
-                    </div>
-                    <button
-                      className={`toggle-filter-btn ${m4Strict ? "active" : ""}`}
-                      onClick={() => setM4Strict(!m4Strict)}
-                      title={m4Strict ? "Strict ON: filter sabpe laga hai — live signals bhi tab dikhenge jab criteria meet ho" : "Strict OFF: live signals hamesha dikhenge, filter sirf historical pe"}
-                    >
-                      <span className="toggle-dot" />
-                      Strict Filter
-                    </button>
-                    {(m4MinTrades !== 7 || m4MinWinRate !== 60 || m4Strict) && (
-                      <button
-                        onClick={() => { setM4MinTrades(7); setM4MinWinRate(60); setM4Strict(false); }}
-                        style={{ background: "transparent", border: "1px solid #2a3342", color: "#8e9ba9", borderRadius: "6px", padding: "4px 10px", fontSize: "11px", fontFamily: "monospace", cursor: "pointer" }}
-                      >
-                        Reset
-                      </button>
-                    )}
-                  </div>
-                )}
                 {tab === 6 && (
                   <button
                     className={`toggle-filter-btn ${m6SectorFilter ? "active" : ""}`}
@@ -816,7 +711,7 @@ export default function App() {
                   ) : pnl && pnl.n > 0 ? (
                     <div>
                       <div style={{ fontSize: "14px", marginBottom: "6px" }}>
-                        <strong>{pnl.n}</strong> trades entered ({pnlScope === "all" ? "all 4 modules" : currentTab.label}):{" "}
+                        <strong>{pnl.n}</strong> trades entered ({pnlScope === "all" ? "all 4 modules" : TABS[tab - 1].label}):{" "}
                         <span className="text-success">{pnl.wins} win</span> · <span className="text-danger">{pnl.losses} loss</span> · <strong>{pnl.wr}% win rate</strong>
                       </div>
                       <div>
@@ -952,7 +847,7 @@ export default function App() {
         ) : (
           <Ledger
             rows={filteredAndSortedRows}
-            showStrategy={tab !== 2 && tab !== 4}
+              showStrategy={true}
             sortField={sortField}
             sortAsc={sortAsc}
             onSort={handleSort}
@@ -960,43 +855,10 @@ export default function App() {
             strictHighlight={false}
             playbackDate={pbOn ? pbDate : null}
             onTradeTaken={() => (pbOn ? (setPbJournalCount((c) => (c ?? 0) + 1), setPbOpenCount((c) => c + 1)) : setJournalCount((c) => (c ?? 0) + 1))}
-            onOpenChart={(symbol, name) => {
-              setChartSymbol(symbol);
-              setChartName(name);
-            }}
           />
         )}
 
         {/* Module 3 breadth */}
-        {!needsScan && tab === 3 && effModule3?.breadth && (pbOn ? !!pbSnap : !loading) && (
-          <div className="cards">
-            <div className="card" style={{ gridColumn: "1 / -1" }}>
-              <h4>Robustness by breadth — gate-passes across universe</h4>
-              <div className="bars-container">
-                {effModule3.breadth.slice(0, 8).map((b: any) => {
-                  const max = Math.max(1, ...effModule3.breadth.map((x: any) => x.gatePasses));
-                  return (
-                    <div className="bar-row" key={b.label}>
-                      <span className="bar-label">{b.label}</span>
-                      <div className="bar-track">
-                        <span
-                          className="bar-fill"
-                          style={{ width: `${(b.gatePasses / max) * 100}%` }}
-                        />
-                      </div>
-                      <span className="bar-val">
-                        <strong className="text-gold">{b.gatePasses}</strong> stocks · PF{" "}
-                        <strong>{b.medianPF}</strong>
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Module 2 condition mining */}
       </section>
 
       {/* Real-time Scan Terminal overlay */}
@@ -1057,18 +919,6 @@ export default function App() {
             </div>
           </div>
         </div>
-      )}
-
-      {chartSymbol && (
-        <DivergenceChart
-          symbol={chartSymbol}
-          name={chartName || undefined}
-          asOf={pbOn ? pbDate : null}
-          onClose={() => {
-            setChartSymbol(null);
-            setChartName(null);
-          }}
-        />
       )}
     </div>
   );

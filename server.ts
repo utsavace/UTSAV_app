@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import { exec } from "child_process";
 import dotenv from "dotenv";
-import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, toWeekly, loadNifty500Tickers, M4_MIN_TRADES, M4_MIN_WIN_RATE, M4_MIN_PF, backtestConnorsRSI, M6_MIN_TRADES, M6_MIN_WIN_RATE, M6_MIN_PF, M6_SECTORS, CRSI_ENTRY_THRESHOLD, CRSI_EXIT_THRESHOLD } from "./scan.ts";
+import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, toWeekly, loadNifty500Tickers, M4_MIN_TRADES, M4_MIN_WIN_RATE, M4_MIN_PF, backtestConnorsRSI, M6_MIN_TRADES, M6_MIN_WIN_RATE, M6_MIN_PF, M6_SECTORS, backtestTurtleSoup, TS_MIN_TRADES, TS_MIN_WIN_RATE, TS_MIN_PF, TS_LOOKBACK, TS_MIN_GAP, TS_TRAIL_ATR } from "./scan.ts";
 import { runCompareSl } from "./compareSlEngine.ts";
 
 // Load env for GEMINI_API_KEY (README uses .env.local; AI Studio injects at runtime)
@@ -140,11 +140,11 @@ function validateCache(): { valid: boolean; reason?: string } {
   const strictT = g.strict?.minOosTrades ?? baseT;
   const strictPF = g.strict?.minProfitFactor ?? basePF;
 
-  for (const n of ["1", "3", "4", "6"]) {
-    const isStrictModule = n !== "4" && n !== "6";
-    const minT = n === "4" ? 7 : n === "6" ? M6_MIN_TRADES : isStrictModule ? strictT : baseT;
-    const minPF = n === "4" ? 1.2 : n === "6" ? M6_MIN_PF : isStrictModule ? strictPF : basePF;
-    const minWRCheck = n === "4" ? 60 : n === "6" ? M6_MIN_WIN_RATE : minWR;
+  for (const n of ["1", "6", "7"]) {
+    const isStrictModule = n !== "6" && n !== "7";
+    const minT = n === "6" ? M6_MIN_TRADES : n === "7" ? TS_MIN_TRADES : isStrictModule ? strictT : baseT;
+    const minPF = n === "6" ? M6_MIN_PF : n === "7" ? TS_MIN_PF : isStrictModule ? strictPF : basePF;
+    const minWRCheck = n === "6" ? M6_MIN_WIN_RATE : n === "7" ? TS_MIN_WIN_RATE : minWR;
 
     const rows = readCache(`module${n}.json`);
     if (rows === null) return { valid: false, reason: `module${n} missing` };
@@ -174,7 +174,7 @@ app.get("/api/meta", (_req, res) => {
 
 app.get("/api/module/:n", (req, res) => {
   const n = req.params.n;
-  if (!["1", "3", "4", "6"].includes(n)) return res.status(400).json({ error: "module must be 1, 3, 4 or 6" });
+  if (!["1", "6", "7"].includes(n)) return res.status(400).json({ error: "module must be 1, 6 or 7" });
   if (!validateCache().valid) return res.json({ needsScan: true, stale: true, rows: [] });
   const data = readCache(`module${n}.json`);
   if (data === null) return res.json({ needsScan: true, rows: [] });
@@ -649,21 +649,16 @@ app.get("/api/playback/snapshot", (req, res) => {
   });
 
   const module1Rows: any[] = [];
-  const module4Rows: any[] = [];
   const module6Rows: any[] = [];
-  const module3Rows: any[] = [];
-  const breadthCount: Record<string, { passes: number; pfs: number[] }> = {};
-  for (const s of STRATEGIES_POOL) breadthCount[s.id] = { passes: 0, pfs: [] };
-  const perStock: { st: PbStock; results: Record<string, any> }[] = [];
+  const module7Rows: any[] = [];
 
   for (const st of db.stocks) {
     const results: Record<string, any> = {};
     for (const sid of Object.keys(st.strategies)) {
       results[sid] = asOfStats(st.strategies[sid].trades, D);
     }
-    perStock.push({ st, results });
 
-    // Module 1: best pool strategy as-of D (same selection rule as the live scan)
+    // Module 1: best pool strategy as-of D
     let bestId = STRATEGIES_POOL[0].id;
     let best = results[bestId];
     for (const s of STRATEGIES_POOL) {
@@ -673,29 +668,10 @@ app.get("/api/playback/snapshot", (req, res) => {
         (r.passedBase === best.passedBase && r.profitFactor > best.profitFactor) ||
         (r.passedBase === best.passedBase && r.profitFactor === best.profitFactor && r.winRatePct > best.winRatePct);
       if (better) { bestId = s.id; best = r; }
-      if (r.passedBase) { breadthCount[s.id].passes++; breadthCount[s.id].pfs.push(r.profitFactor); }
     }
     if (best.passedStrict) {
       const live = findLiveSignal(st.strategies[bestId].signals, st.symbol, D);
       module1Rows.push(mkRow(st, bestId, best, live, { fields: { liveStop: live?.stop ?? null, liveTarget: live?.tgt ?? null } }));
-    }
-
-    // Module 4: RSI Divergence — relaxed gate (weekly cadence, avg ~2 trades/stock)
-    const m4 = results["m4_divergence"];
-    const m4live4 = st.strategies["m4_divergence"]?.signals
-      ? findLiveSignal(st.strategies["m4_divergence"].signals, st.symbol, D)
-      : undefined;
-    const m4passed = m4 && st.strategies["m4_divergence"] && (
-      m4live4 ||  // live signal → always include
-      (m4.numTrades >= M4_MIN_TRADES && m4.winRatePct >= M4_MIN_WIN_RATE && m4.profitFactor >= M4_MIN_PF)
-    );
-    if (m4passed) {
-      module4Rows.push(mkRow(st, "m4_divergence", m4, m4live4, {
-        strategyLabel: "RSI Divergence (Weekly)",
-        entryCond: "WEEKLY bullish RSI divergence (price lower-low, RSI higher-low from oversold), entry next week's open after pivot confirms",
-        exitCond: "SL 2.5x ATR, target 5x ATR (weekly), ya bearish divergence confirm hone pe exit",
-        fields: { hasChart: true, liveStop: m4live4?.stop ?? null, liveTarget: m4live4?.tgt ?? null }
-      }));
     }
 
     // Module 6: ConnorsRSI Scanner
@@ -707,39 +683,39 @@ app.get("/api/playback/snapshot", (req, res) => {
     if (m6passed) {
       const inTargetSector = M6_SECTORS.has(st.sector || "");
       module6Rows.push(mkRow(st, "m6_connors_rsi", m6, m6live, {
-        strategyLabel: "ConnorsRSI Scanner",
+        strategyLabel: "ConnorsRSI Oversold",
         entryCond: "Price > EMA(200) aur ConnorsRSI(3,2,100) < 15 — deeply oversold in confirmed uptrend",
         exitCond: "ConnorsRSI > 90 hone pe exit (emergency floor: -8% from entry)",
         fields: { inTargetSector, liveStop: null, liveTarget: null, hasChart: false }
       }));
     }
-  }
 
-  // Module 3: as-of breadth winner (identical metric to the chart)
-  const median = (a: number[]) => { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
-  const breadth = STRATEGIES_POOL.map((s) => ({ label: s.label, id: s.id, gatePasses: breadthCount[s.id].passes, medianPF: parseFloat(median(breadthCount[s.id].pfs).toFixed(2)) }))
-    .sort((a, b) => b.gatePasses - a.gatePasses || b.medianPF - a.medianPF);
-  const winner = breadth[0];
-  for (const { st, results } of perStock) {
-    const r = results[winner.id];
-    if (r && r.passedStrict) {
-      const live = findLiveSignal(st.strategies[winner.id].signals, st.symbol, D);
-      module3Rows.push(mkRow(st, winner.id, r, live, { fields: { strategyId: "m3_best_overall", liveStop: live?.stop ?? null, liveTarget: live?.tgt ?? null } }));
+    // Module 7: Turtle Soup Scanner
+    const m7 = st.strategies["m7_turtle_soup"] ? asOfStats(st.strategies["m7_turtle_soup"].trades, D) : null;
+    const m7live = st.strategies["m7_turtle_soup"]?.signals
+      ? findLiveSignal(st.strategies["m7_turtle_soup"].signals, st.symbol, D)
+      : undefined;
+    const m7passed = m7 && (m7live || (m7.numTrades >= TS_MIN_TRADES && m7.winRatePct >= TS_MIN_WIN_RATE && m7.profitFactor >= TS_MIN_PF));
+    if (m7passed) {
+      module7Rows.push(mkRow(st, "m7_turtle_soup", m7, m7live, {
+        strategyLabel: "Turtle Soup",
+        entryCond: `New 20-day low bana + previous 20-day low ${TS_MIN_GAP}+ sessions pehle tha → reversal buy stop above previous 20-day low`,
+        exitCond: `Trailing stop: ${TS_TRAIL_ATR}× ATR below peak — automatic trail exit`,
+        fields: { liveStop: null, liveTarget: null, hasChart: false }
+      }));
     }
   }
 
-  const liveCount = module1Rows.filter((r) => r.liveSignal).length + module3Rows.filter((r) => r.liveSignal).length + module4Rows.filter((r) => r.liveSignal).length + module6Rows.filter((r) => r.liveSignal).length;
+  const liveCount = module1Rows.filter((r) => r.liveSignal).length + module6Rows.filter((r) => r.liveSignal).length + module7Rows.filter((r) => r.liveSignal).length;
 
   res.json({
     ok: true,
     date: D,
-    counts: { module1: module1Rows.length, module3: module3Rows.length, module4: module4Rows.length, module6: module6Rows.filter((r) => r.liveSignal).length },
+    counts: { module1: module1Rows.length, module6: module6Rows.filter((r) => r.liveSignal).length, module7: module7Rows.filter((r) => r.liveSignal).length },
     liveCount,
     module1: module1Rows,
-    module3: module3Rows,
-    module4: module4Rows,
     module6: module6Rows,
-    module3Meta: { chosenStrategyLabel: winner.label, gatePasses: winner.gatePasses, breadth: breadth.map(({ id, ...rest }) => rest) }
+    module7: module7Rows,
   });
 });
 
