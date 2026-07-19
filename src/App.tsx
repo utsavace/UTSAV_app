@@ -39,7 +39,7 @@ const TABS = [
 const DESC: Record<number, string> = {
   1: "Stochastic RSI Trend Filter — StochRSI K crosses D below 15 + ADX > 20 → next bar open pe entry. Exit: K crosses D above 80. 10yr zero-lookahead OOS validated: PF 1.71, Win 58.3%, 6/6 years profitable. Gate: 10 trades / 55% WR / 1.5 PF.",
   6: "ConnorsRSI(3,2,100) oversold scanner — Price > EMA(200) + ConnorsRSI < 15 (deeply oversold in uptrend) → next bar open pe entry. Exit: ConnorsRSI > 90. 10yr OOS validated: PF 2.74, Win 72.1%, 5/5 years profitable. Gate: 10 trades / 60% WR / 1.5 PF.",
-  7: "Turtle Soup (Connors & Raschke, Street Smarts 1995) — New 20-day low bana + previous 20-day low 4+ sessions pehle tha → false breakdown reversal. Entry: buy stop above previous 20-day low. Exit: 2×ATR trailing stop. 10yr OOS validated: PF 3.68, Win 54.4%, 10/10 years profitable. Zero parameter optimization.",
+  7: "Turtle Soup (Connors & Raschke, Street Smarts 1995) — New 20-day low bana + previous 20-day low 4+ sessions pehle tha → false breakdown reversal. BUY: entry above previous low, SL today's low, Target 1:2 RR. SELL: entry below previous high, SL today's high, Target 1:1.2 RR. No gate — all stocks. 10yr OOS: PF 1.64, Win 64.4%, 10/10 years profitable.",
   5: "Tumhara personal trade journal — jis stock ka trade lena ho usse yahan save karo. App rooz check karta hai ki exit signal aaya ya nahi aur status dikhata hai: Holding ✅ ya EXIT ⚠️.",
 };
 
@@ -442,6 +442,7 @@ export default function App() {
   const effCounts = pbOn ? pbSnap?.counts : meta?.counts;
   const sourceRowsLen = pbOn ? ((pbSnap?.["module" + tab] as LedgerRow[] | undefined)?.length ?? 0) : rows.length;
   const pbIdx = pbOn && pbDate ? pbAxis.indexOf(pbDate) : -1;
+  const currentTab = useMemo(() => TABS.find((t) => t.n === tab) || TABS[0], [tab]);
 
   return (
     <div className="app">
@@ -640,7 +641,7 @@ export default function App() {
       <section className="panel">
         <div className="panel-head-group">
           <div className="panel-info">
-            <h2>{TABS[tab - 1].label}</h2>
+            <h2>{currentTab.label}</h2>
             <p>{DESC[tab]}</p>
           </div>
           {!needsScan && sourceRowsLen > 0 && (
@@ -711,7 +712,7 @@ export default function App() {
                   ) : pnl && pnl.n > 0 ? (
                     <div>
                       <div style={{ fontSize: "14px", marginBottom: "6px" }}>
-                        <strong>{pnl.n}</strong> trades entered ({pnlScope === "all" ? "all 4 modules" : TABS[tab - 1].label}):{" "}
+                        <strong>{pnl.n}</strong> trades entered ({pnlScope === "all" ? "all 4 modules" : currentTab.label}):{" "}
                         <span className="text-success">{pnl.wins} win</span> · <span className="text-danger">{pnl.losses} loss</span> · <strong>{pnl.wr}% win rate</strong>
                       </div>
                       <div>

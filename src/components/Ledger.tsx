@@ -321,6 +321,27 @@ export function Ledger({
                   🛡️ Emergency floor: entry se <strong>−8%</strong> neeche gaye to manually exit karo
                 </div>
               </div>
+            ) : r.strategyId === "m7_turtle_soup" ? (
+              // M7 Turtle Soup: BUY 1:2 RR, SELL 1:1.2 RR — liveStop/liveTarget already computed
+              <div>
+                <div className="flex flex-wrap gap-3 items-center mb-2">
+                  <label className="flex items-center gap-1">Entry ₹ <input style={inp} value={tEntry} onChange={(e) => recalcFromEntry(r, e.target.value)} placeholder="e.g. 542" /></label>
+                  <label className="flex items-center gap-1">Stop ₹ <input style={{ ...inp, borderColor: "rgba(239,68,68,0.5)" }} value={tStop} onChange={(e) => setTStop(e.target.value)} /></label>
+                  <label className="flex items-center gap-1">Target ₹ <input style={{ ...inp, borderColor: "rgba(34,197,94,0.5)" }} value={tTarget} onChange={(e) => setTTarget(e.target.value)} /></label>
+                  <button onClick={() => submitTake(r)} disabled={taking} className="bg-green-600 hover:bg-green-700 text-slate-950 font-extrabold border-none rounded-sm px-3 py-1 cursor-pointer text-xs disabled:opacity-60">
+                    {taking ? "Saving…" : "✓ Confirm"}
+                  </button>
+                  <button onClick={() => setTakeOpen(null)} className="bg-transparent text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-600 rounded-sm px-3 py-1 cursor-pointer text-xs">Cancel</button>
+                </div>
+                <div className="text-emerald-400/80 text-[11px] mt-1 leading-5">
+                  {Number(tEntry) > 0 && Number(tTarget) > Number(tEntry)
+                    ? <>🐢 BUY — <strong>1:2 Risk:Reward</strong> · Entry ₹{tEntry} · Stop ₹{tStop} · Target ₹{tTarget}</>
+                    : Number(tEntry) > 0 && Number(tTarget) < Number(tEntry)
+                    ? <>🐢 SELL — <strong>1:1.2 Risk:Reward</strong> · Entry ₹{tEntry} · Stop ₹{tStop} · Target ₹{tTarget}</>
+                    : <>🐢 Turtle Soup — BUY side: 1:2 RR · SELL side: 1:1.2 RR</>
+                  }
+                </div>
+              </div>
             ) : (
               <div className="flex flex-wrap gap-3 items-center">
                 <label className="flex items-center gap-1">Entry ₹ <input style={inp} value={tEntry} onChange={(e) => recalcFromEntry(r, e.target.value)} placeholder="e.g. 3048" /></label>
