@@ -599,26 +599,50 @@ app.get("/api/playback/snapshot", (req, res) => {
   // ±1% price proximity + 2-bar window signal finder (same rule as live scan)
   // Signals array is sorted by date. Find the most recent signal on or before D
   // that is within 2 bars of D AND within ±1% of current price (candlesUpTo last close).
-  // ADX filter helper for playback — candles as-of D se ADX compute karo
+  // ADX filter helper for playback — candles as-of D se proper ADX compute karo
   function adxAsOf(symbol: string, D: string): number {
     if (ADX_LIVE_FILTER <= 0) return 999; // filter off
     const candles = candlesUpTo(symbol, D);
     if (!candles || candles.length < 30) return 0;
-    // Simple ADX calculation on last 60 bars
-    const n = Math.min(candles.length, 60);
-    const slice = candles.slice(-n);
     const p = 14;
-    let tr = 0, pdm = 0, ndm = 0;
-    for (let i = 1; i < p + 1 && i < slice.length; i++) {
-      const h = slice[i].high, l = slice[i].low, pc = slice[i - 1].close;
-      tr  += Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
-      const up = h - slice[i - 1].high, dn = slice[i - 1].low - l;
-      pdm += up > dn && up > 0 ? up : 0;
-      ndm += dn > up && dn > 0 ? dn : 0;
+    const n = candles.length;
+    // Proper ADX matching scan.ts calculateADX
+    const tr = new Array(n).fill(0);
+    const pdm = new Array(n).fill(0);
+    const ndm = new Array(n).fill(0);
+    for (let i = 1; i < n; i++) {
+      const h = candles[i].high, l = candles[i].low, pc = candles[i-1].close;
+      tr[i] = Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+      const up = h - candles[i-1].high, dn = candles[i-1].low - l;
+      pdm[i] = up > dn && up > 0 ? up : 0;
+      ndm[i] = dn > up && dn > 0 ? dn : 0;
     }
-    if (tr === 0) return 0;
-    const pdi = 100 * pdm / tr, ndi = 100 * ndm / tr;
-    return pdi + ndi > 0 ? 100 * Math.abs(pdi - ndi) / (pdi + ndi) : 0;
+    // Wilder smoothing
+    const at = new Array(n).fill(0), ap = new Array(n).fill(0), an = new Array(n).fill(0);
+    if (n > p) {
+      at[p] = tr.slice(1, p+1).reduce((a,b)=>a+b,0);
+      ap[p] = pdm.slice(1, p+1).reduce((a,b)=>a+b,0);
+      an[p] = ndm.slice(1, p+1).reduce((a,b)=>a+b,0);
+    }
+    for (let i = p+1; i < n; i++) {
+      at[i] = at[i-1] - at[i-1]/p + tr[i];
+      ap[i] = ap[i-1] - ap[i-1]/p + pdm[i];
+      an[i] = an[i-1] - an[i-1]/p + ndm[i];
+    }
+    const dx = new Array(n).fill(0);
+    const adx = new Array(n).fill(0);
+    for (let i = p; i < n; i++) {
+      const pdi = at[i] > 0 ? 100*ap[i]/at[i] : 0;
+      const ndi = at[i] > 0 ? 100*an[i]/at[i] : 0;
+      dx[i] = pdi+ndi > 0 ? 100*Math.abs(pdi-ndi)/(pdi+ndi) : 0;
+    }
+    if (n > 2*p) {
+      adx[2*p-1] = dx.slice(p, 2*p).reduce((a,b)=>a+b,0)/p;
+    }
+    for (let i = 2*p; i < n; i++) {
+      adx[i] = (adx[i-1]*(p-1) + dx[i])/p;
+    }
+    return adx[n-1];
   }
 
   function findLiveSignal(signals: PbSignal[], symbol: string, D: string): PbSignal | undefined {
