@@ -223,6 +223,29 @@ export function Ledger({
     }
     setTaking(true);
     try {
+      // Playback mode me alag endpoint — live journal me nahi jaayega
+      if (playbackDate) {
+        const res = await fetch("/api/playback/trades/take", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            symbol: r.symbol,
+            name: r.name,
+            strategyId: r.strategyId,
+            strategyLabel: r.strategyLabel,
+            signalDate: playbackDate,
+            stopPct: isM6 ? 8 : Math.round((entryPrice - stopPrice) / entryPrice * 100 * 10) / 10,
+            targetPct: isM6 ? Math.max(r.avgReturnPct, 3) : Math.round((targetPrice - entryPrice) / entryPrice * 100 * 10) / 10,
+          })
+        });
+        const d = await res.json();
+        if (d.ok) {
+          setTakeMsg("✅ Practice journal mein add ho gaya — 'My Trades' tab mein track hoga");
+          setTakeOpen(null);
+          if (onTradeTaken) onTradeTaken();
+        } else setTakeMsg(`❌ ${d.error || "save fail"}`);
+        return;
+      }
       const res = await fetch("/api/trades/take", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
