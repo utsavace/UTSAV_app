@@ -456,6 +456,9 @@ export const MIN_TRADES = 10;          // validated: 10 trades minimum per stock
 export const MIN_WIN_RATE = 55;        // relaxed from 60 — data shows 55% sufficient for real edge
 export const MIN_PROFIT_FACTOR = 1.5;  // relaxed from 2.0 — OOS validated PF 1.71
 export const STRICT_TRADES = 10;       // same as base — strict gate same as base (data validated)
+// ADX live signal filter — sirf woh signals dikhao jahan ADX >= threshold
+// OOS validated: ADX>30 pe PF 2.66, Win 65.9% — best filter
+export const ADX_LIVE_FILTER = 29;     // min ADX for a LIVE signal to show (0 = off)
 // M4 (Weekly RSI Divergence) gate — only show stocks with win rate >= 50% and >= 7 trades
 export const M4_MIN_TRADES = 7;    // minimum 7 completed trades
 export const M4_MIN_WIN_RATE = 60; // 60% win rate minimum
@@ -972,6 +975,13 @@ function backtestStrategy(
         liveTargetOut = lastSig.tgt;
       }
     }
+  }
+
+  // ADX live filter — sirf woh signal dikhao jahan latest ADX >= ADX_LIVE_FILTER
+  // Historical trades pe koi asar nahi — sirf live signal gate karta hai
+  const latestADX = adx[adx.length - 1] || 0;
+  if (ADX_LIVE_FILTER > 0 && liveSignal && latestADX < ADX_LIVE_FILTER) {
+    liveSignal = false; // ADX filter se bahar — signal suppress
   }
 
   // Pass filter: meet the dynamic config limits (win rate, profit factor, minimum trades)
@@ -1584,6 +1594,12 @@ export function backtestDivergence(dailyOhlcv: OHLCV[]): BacktestStats {
       liveStop = lastSig.stop ?? liveStop;
       liveTarget = lastSig.tgt ?? liveTarget;
     }
+  }
+  // ADX live filter — M6 pe bhi apply karo
+  const adxM6 = calculateADX(ohlcv, 14);
+  const latestADXM6 = adxM6[adxM6.length - 1] || 0;
+  if (ADX_LIVE_FILTER > 0 && liveSignal && latestADXM6 < ADX_LIVE_FILTER) {
+    liveSignal = false;
   }
   return {
     numTrades: trades.length,

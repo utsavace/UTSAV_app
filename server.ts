@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import { exec } from "child_process";
 import dotenv from "dotenv";
-import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, toWeekly, loadNifty500Tickers, M4_MIN_TRADES, M4_MIN_WIN_RATE, M4_MIN_PF, backtestConnorsRSI, M6_MIN_TRADES, M6_MIN_WIN_RATE, M6_MIN_PF, M6_SECTORS, backtestTurtleSoup, TS_MIN_TRADES, TS_MIN_WIN_RATE, TS_MIN_PF, TS_LOOKBACK, TS_MIN_GAP, TS_TRAIL_ATR } from "./scan.ts";
+import { runScan, NO_LOSS_PF_CAP, fetchStockData, evaluateTradeOutcome, STRATEGIES_POOL, type JournalTrade, calculateRSI, detectDivergences, toWeekly, loadNifty500Tickers, M4_MIN_TRADES, M4_MIN_WIN_RATE, M4_MIN_PF, backtestConnorsRSI, M6_MIN_TRADES, M6_MIN_WIN_RATE, M6_MIN_PF, M6_SECTORS, backtestTurtleSoup, TS_MIN_TRADES, TS_MIN_WIN_RATE, TS_MIN_PF, TS_LOOKBACK, TS_MIN_GAP, TS_TRAIL_ATR, ADX_LIVE_FILTER } from "./scan.ts";
 import { runCompareSl } from "./compareSlEngine.ts";
 
 // Load env for GEMINI_API_KEY (README uses .env.local; AI Studio injects at runtime)
@@ -599,6 +599,28 @@ app.get("/api/playback/snapshot", (req, res) => {
   // ±1% price proximity + 2-bar window signal finder (same rule as live scan)
   // Signals array is sorted by date. Find the most recent signal on or before D
   // that is within 2 bars of D AND within ±1% of current price (candlesUpTo last close).
+  // ADX filter helper for playback — candles as-of D se ADX compute karo
+  function adxAsOf(symbol: string, D: string): number {
+    if (ADX_LIVE_FILTER <= 0) return 999; // filter off
+    const candles = candlesUpTo(symbol, D);
+    if (!candles || candles.length < 30) return 0;
+    // Simple ADX calculation on last 60 bars
+    const n = Math.min(candles.length, 60);
+    const slice = candles.slice(-n);
+    const p = 14;
+    let tr = 0, pdm = 0, ndm = 0;
+    for (let i = 1; i < p + 1 && i < slice.length; i++) {
+      const h = slice[i].high, l = slice[i].low, pc = slice[i - 1].close;
+      tr  += Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+      const up = h - slice[i - 1].high, dn = slice[i - 1].low - l;
+      pdm += up > dn && up > 0 ? up : 0;
+      ndm += dn > up && dn > 0 ? dn : 0;
+    }
+    if (tr === 0) return 0;
+    const pdi = 100 * pdm / tr, ndi = 100 * ndm / tr;
+    return pdi + ndi > 0 ? 100 * Math.abs(pdi - ndi) / (pdi + ndi) : 0;
+  }
+
   function findLiveSignal(signals: PbSignal[], symbol: string, D: string): PbSignal | undefined {
     const axis = db!.axis;
     const dIdx = axis.indexOf(D);
@@ -623,6 +645,15 @@ app.get("/api/playback/snapshot", (req, res) => {
       }
     }
     return undefined;
+  }
+
+  // ADX-filtered live signal wrapper
+  function findLiveSignalADX(signals: PbSignal[], symbol: string, D: string): PbSignal | undefined {
+    const sig = findLiveSignal(signals, symbol, D);
+    if (!sig) return undefined;
+    if (ADX_LIVE_FILTER <= 0) return sig;
+    const adx = adxAsOf(symbol, D);
+    return adx >= ADX_LIVE_FILTER ? sig : undefined;
   }
 
   const mkRow = (st: PbStock, sid: string, stats: any, live: PbSignal | undefined, extra: any = {}) => ({
@@ -670,14 +701,14 @@ app.get("/api/playback/snapshot", (req, res) => {
       if (better) { bestId = s.id; best = r; }
     }
     if (best.passedStrict) {
-      const live = findLiveSignal(st.strategies[bestId].signals, st.symbol, D);
+      const live = findLiveSignalADX(st.strategies[bestId].signals, st.symbol, D);
       module1Rows.push(mkRow(st, bestId, best, live, { fields: { liveStop: live?.stop ?? null, liveTarget: live?.tgt ?? null } }));
     }
 
     // Module 6: ConnorsRSI Scanner
     const m6 = st.strategies["m6_connors_rsi"] ? asOfStats(st.strategies["m6_connors_rsi"].trades, D) : null;
     const m6live = st.strategies["m6_connors_rsi"]?.signals
-      ? findLiveSignal(st.strategies["m6_connors_rsi"].signals, st.symbol, D)
+      ? findLiveSignalADX(st.strategies["m6_connors_rsi"].signals, st.symbol, D)
       : undefined;
     const m6passed = m6 && (m6live || (m6.numTrades >= M6_MIN_TRADES && m6.winRatePct >= M6_MIN_WIN_RATE && m6.profitFactor >= M6_MIN_PF));
     if (m6passed) {
